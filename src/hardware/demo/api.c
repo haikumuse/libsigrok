@@ -95,6 +95,9 @@ static const uint32_t devopts[] = {
 	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_MAX | SR_CONF_GET | SR_CONF_SET,
+	/* DSO max sample rate (per-channel). Used by SamplingBar to clamp the
+	 * timebase-derived sample rate in commit_hori_res(). */
+	SR_CONF_MAX_DSO_SAMPLERATE | SR_CONF_GET,
 };
 
 static const uint32_t devopts_cg_logic[] = {
@@ -495,6 +498,12 @@ static int config_get(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_MAX_HEIGHT:
 		*data = g_variant_new_string(dso_max_heights[0]);
+		break;
+	case SR_CONF_MAX_DSO_SAMPLERATE:
+		/* Per-channel max DSO sample rate. Demo device advertises 200 MHz
+		 * (matches libsigrok4DSL demo driver). Used by SamplingBar to
+		 * clamp commit_hori_res() output. */
+		*data = g_variant_new_uint64(SR_MHZ(200));
 		break;
 	/* --- DSO per-channel config --- */
 	case SR_CONF_PROBE_VDIV:

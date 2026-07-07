@@ -356,6 +356,8 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Probe map max", NULL},
 	{SR_CONF_PROBE_CONFIGS, SR_T_INT32, "probe_configs",
 		"Probe configs", NULL},
+	{SR_CONF_MAX_DSO_SAMPLERATE, SR_T_UINT64, "max_dso_samplerate",
+		"Max DSO sample rate", NULL},
 	{SR_CONF_DEVICE_OPTIONS, SR_T_UINT64, "device_options",
 		"Device options", NULL},
 	{SR_CONF_DEVICE_SESSIONS, SR_T_UINT64, "device_sessions",

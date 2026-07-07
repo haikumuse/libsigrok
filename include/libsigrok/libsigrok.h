@@ -1397,6 +1397,10 @@ enum sr_configkey {
 	SR_CONF_PROBE_MAP_MAX,        /* 60061 */
 	SR_CONF_PROBE_CONFIGS,        /* 60062 — probe config key list for
 	                               * ProbeOptions binding (DAQ/DSO map_*). */
+	SR_CONF_MAX_DSO_SAMPLERATE,   /* 60063 — max DSO sample rate (per-channel).
+	                               * Used by SamplingBar::commit_hori_res() to
+	                               * clamp the timebase-derived sample rate.
+	                               * Ported from libsigrok4DSL (was 30073). */
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };
