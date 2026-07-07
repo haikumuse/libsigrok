@@ -22,18 +22,15 @@
 
 #include "protocol.h"
 
-/* htole16: on Linux glibc <endian.h> provides it via __uint16_identity macro.
- * On macOS it is provided by <libkern/OSByteOrder.h> via <sys/_endian.h>.
- * On Windows (MinGW) <endian.h> lacks htole16, so we provide a manual
- * fallback below. Including the platform endian header on non-Windows
- * ensures htole16 is declared even if no other header pulls it in. */
-#ifndef _WIN32
-#ifdef __APPLE__
-#include <libkern/OSByteOrder.h>
-#else
-#include <endian.h>
-#endif
-#endif
+/* htole16: host-to-little-endian 16-bit conversion.
+ * PXView targets only little-endian platforms (x86_64/arm64), so this is
+ * a no-op. Using a single cross-platform definition avoids differences
+ * between glibc <endian.h> (htole16 macro), macOS <libkern/OSByteOrder.h>
+ * (OSSwapHostToLittleInt16), and MinGW (no built-in). */
+static inline uint16_t htole16(uint16_t value)
+{
+	return value;
+}
 
 static int slogic16U3_remote_test_mode(const struct sr_dev_inst *sdi, uint32_t mode);
 
@@ -814,25 +811,6 @@ int slogic_soft_trigger_raw_data(void *data, size_t len,
 
 	return ret;
 }
-
-// htole16: host-to-little-endian 16-bit conversion.
-// - Linux glibc <endian.h> defines htole16 via __uint16_identity macro.
-// - macOS <libkern/OSByteOrder.h> provides htole16 through <sys/_endian.h>.
-// - MinGW (Windows) lacks htole16, so provide a manual fallback there.
-#ifdef _WIN32
-static inline uint16_t htole16(uint16_t value)
-{
-	const union {
-		uint16_t val;
-		uint8_t bytes[2];
-	} u = { .val = 0x1234 };
-	if (u.bytes[0] == 0x34) { // __LITTLE_ENDIAN
-		return value;
-	} else {
-		return ((value & 0xFF) << 8) | ((value >> 8) & 0xFF);
-	}
-}
-#endif
 
 static inline void clear_ep(const struct sr_dev_inst *sdi)
 {
