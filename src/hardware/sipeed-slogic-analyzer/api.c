@@ -26,7 +26,12 @@
  * PXView targets only little-endian platforms (x86_64/arm64), so this is
  * a no-op. Using a single cross-platform definition avoids differences
  * between glibc <endian.h> (htole16 macro), macOS <libkern/OSByteOrder.h>
- * (OSSwapHostToLittleInt16), and MinGW (no built-in). */
+ * (OSSwapHostToLittleInt16), and MinGW (no built-in).
+ * glibc <endian.h> defines htole16 as a macro expanding to __uint16_identity;
+ * we #undef it to prevent macro expansion from rewriting our function name. */
+#ifdef htole16
+#undef htole16
+#endif
 static inline uint16_t htole16(uint16_t value)
 {
 	return value;
