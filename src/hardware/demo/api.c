@@ -69,6 +69,20 @@ static const uint32_t devopts[] = {
 	SR_CONF_AVG_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
+	/* DSO device-level options */
+	SR_CONF_TIMEBASE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_MAX_TIMEBASE | SR_CONF_GET,
+	SR_CONF_MIN_TIMEBASE | SR_CONF_GET,
+	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_HORIZ_TRIGGERPOS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_INSTANT | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_HW_DEPTH | SR_CONF_GET,
+	SR_CONF_VLD_CH_NUM | SR_CONF_GET,
+	SR_CONF_UNIT_BITS | SR_CONF_GET,
+	SR_CONF_REF_MIN | SR_CONF_GET,
+	SR_CONF_REF_MAX | SR_CONF_GET,
+	SR_CONF_MAX_HEIGHT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
 static const uint32_t devopts_cg_logic[] = {
@@ -87,6 +101,19 @@ static const uint32_t devopts_cg_analog_channel[] = {
 	SR_CONF_OFFSET | SR_CONF_GET | SR_CONF_SET,
 };
 
+static const uint32_t devopts_cg_dso_channel[] = {
+	SR_CONF_PROBE_VDIV | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_COUPLING | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_HW_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_VALUE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_FACTOR | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_MAP_MAX | SR_CONF_GET | SR_CONF_SET,
+};
+
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_ZERO,
 	SR_TRIGGER_ONE,
@@ -101,6 +128,31 @@ static const uint64_t samplerates[] = {
 	SR_HZ(1),
 };
 
+/* DSO vdiv list (10mV to 2V). */
+static const uint64_t dso_vdivs[] = {
+	SR_mV(10), SR_mV(20), SR_mV(50), SR_mV(100),
+	SR_mV(200), SR_mV(500), SR_V(1), SR_V(2),
+};
+
+/* DSO coupling modes. */
+static const int32_t dso_couplings[] = { 0 /*GND*/, 1 /*DC*/, 2 /*AC*/ };
+
+/* DSO timebase list (ns). */
+static const uint64_t dso_timebases[] = {
+	SR_NS(10), SR_NS(20), SR_NS(50), SR_NS(100),
+	SR_NS(200), SR_NS(500), SR_US(1), SR_US(2),
+	SR_US(5), SR_US(10), SR_US(20), SR_US(50),
+	SR_MS(1), SR_MS(2), SR_MS(5), SR_MS(10),
+	SR_MS(20), SR_MS(50), SR_MS(100), SR_MS(200),
+	SR_MS(500),
+};
+
+/* DSO max height strings. */
+static const char *dso_max_heights[] = { "1X", "2X", "3X", "4X", "5X" };
+
+/* DSO probe map units. */
+static const char *dso_map_units[] = { "V", "A", "°C", "°F", "g", "m", "m/s" };
+
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
 	struct dev_context *devc;
@@ -110,12 +162,13 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	struct sr_config *src;
 	struct analog_gen *ag;
 	GSList *l;
-	int num_logic_channels, num_analog_channels, pattern, i;
+	int num_logic_channels, num_analog_channels, num_dso_channels, pattern, i;
 	uint64_t limit_frames;
 	char channel_name[16];
 
 	num_logic_channels = DEFAULT_NUM_LOGIC_CHANNELS;
 	num_analog_channels = DEFAULT_NUM_ANALOG_CHANNELS;
+	num_dso_channels = DEFAULT_NUM_DSO_CHANNELS;
 	limit_frames = DEFAULT_LIMIT_FRAMES;
 	for (l = options; l; l = l->next) {
 		src = l->data;
@@ -148,6 +201,30 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->limit_frames = limit_frames;
 	devc->capture_ratio = 20;
 	devc->stl = NULL;
+
+	/* DSO initialization. */
+	devc->num_dso_channels = num_dso_channels;
+	devc->enabled_dso_channels = 0;
+	devc->dso_unit_bits = DSO_SAMPLE_BITS;
+	devc->dso_ref_min = 1;
+	devc->dso_ref_max = 255;
+	devc->dso_timebase = SR_NS(500);
+	devc->dso_max_timebase = SR_MS(500);
+	devc->dso_min_timebase = SR_NS(10);
+	devc->dso_trig_hrate = 0;
+	devc->dso_trig_source = 0;
+	devc->dso_trig_slope = 0;
+	devc->dso_buf = NULL;
+	devc->dso_sent_samples = 0;
+	for (i = 0; i < num_dso_channels && i < DSO_MAX_CHANNELS; i++) {
+		devc->dso_vdiv[i] = DSO_DEFAULT_VDIV;
+		devc->dso_vfactor[i] = DSO_DEFAULT_VDIV;
+		devc->dso_offset[i] = DSO_DEFAULT_OFFSET;
+		devc->dso_hw_offset[i] = DSO_DEFAULT_HW_OFFSET;
+		devc->dso_coupling[i] = DSO_DEFAULT_COUPLING;
+		devc->dso_trig_value[i] = DSO_DEFAULT_TRIG_VAL;
+		devc->dso_enabled[i] = TRUE;
+	}
 
 	if (num_logic_channels > 0) {
 		/* Logic channels, all in one channel group. */
@@ -205,7 +282,21 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			g_hash_table_insert(devc->ch_ag, ch, ag);
 
 			if (++pattern == ARRAY_SIZE(analog_pattern_str))
-				pattern = 0;
+			pattern = 0;
+		}
+	}
+
+	/* DSO channels, each in its own channel group for per-channel config. */
+	if (num_dso_channels > 0) {
+		for (i = 0; i < num_dso_channels; i++) {
+			snprintf(channel_name, 16, "O%d", i);
+			ch = sr_channel_new(sdi,
+				i + num_logic_channels + num_analog_channels,
+				SR_CHANNEL_DSO, TRUE, channel_name);
+			/* Each DSO channel gets its own channel group so
+			 * per-channel vdiv/coupling/offset can be addressed. */
+			cg = sr_channel_group_new(sdi, channel_name, NULL);
+			cg->channels = g_slist_append(NULL, ch);
 		}
 	}
 
@@ -226,6 +317,10 @@ static void clear_helper(struct dev_context *devc)
 	while (g_hash_table_iter_next(&iter, NULL, &value))
 		g_free(value);
 	g_hash_table_unref(devc->ch_ag);
+
+	/* DSO scratch buffer. */
+	g_free(devc->dso_buf);
+	devc->dso_buf = NULL;
 }
 
 static int dev_clear(const struct sr_dev_driver *di)
@@ -315,6 +410,101 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_CAPTURE_RATIO:
 		*data = g_variant_new_uint64(devc->capture_ratio);
 		break;
+	/* --- DSO device-level config --- */
+	case SR_CONF_TIMEBASE:
+		*data = g_variant_new_uint64(devc->dso_timebase);
+		break;
+	case SR_CONF_MAX_TIMEBASE:
+		*data = g_variant_new_uint64(devc->dso_max_timebase);
+		break;
+	case SR_CONF_MIN_TIMEBASE:
+		*data = g_variant_new_uint64(devc->dso_min_timebase);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		*data = g_variant_new_byte(devc->dso_trig_source);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_byte(devc->dso_trig_slope);
+		break;
+	case SR_CONF_HORIZ_TRIGGERPOS:
+		*data = g_variant_new_byte(devc->dso_trig_hrate);
+		break;
+	case SR_CONF_INSTANT:
+		*data = g_variant_new_boolean(FALSE);
+		break;
+	case SR_CONF_HW_DEPTH:
+		*data = g_variant_new_uint64(DSO_PACKET_LEN);
+		break;
+	case SR_CONF_VLD_CH_NUM:
+		*data = g_variant_new_int32(devc->num_dso_channels);
+		break;
+	case SR_CONF_UNIT_BITS:
+		*data = g_variant_new_byte(devc->dso_unit_bits);
+		break;
+	case SR_CONF_REF_MIN:
+		*data = g_variant_new_uint32(devc->dso_ref_min);
+		break;
+	case SR_CONF_REF_MAX:
+		*data = g_variant_new_uint32(devc->dso_ref_max);
+		break;
+	case SR_CONF_MAX_HEIGHT:
+		*data = g_variant_new_string(dso_max_heights[0]);
+		break;
+	/* --- DSO per-channel config --- */
+	case SR_CONF_PROBE_VDIV:
+	case SR_CONF_PROBE_COUPLING:
+	case SR_CONF_TRIGGER_VALUE:
+	case SR_CONF_PROBE_OFFSET:
+	case SR_CONF_PROBE_HW_OFFSET:
+	case SR_CONF_PROBE_FACTOR:
+	case SR_CONF_PROBE_MAP_DEFAULT:
+	case SR_CONF_PROBE_MAP_UNIT:
+	case SR_CONF_PROBE_MAP_MIN:
+	case SR_CONF_PROBE_MAP_MAX:
+	{
+		if (!cg)
+			return SR_ERR_CHANNEL_GROUP;
+		ch = cg->channels->data;
+		if (ch->type != SR_CHANNEL_DSO)
+			return SR_ERR_ARG;
+		int idx = ch->index - devc->num_logic_channels
+			- devc->num_analog_channels;
+		if (idx < 0 || idx >= devc->num_dso_channels)
+			return SR_ERR_ARG;
+		switch (key) {
+		case SR_CONF_PROBE_VDIV:
+			*data = g_variant_new_uint64(devc->dso_vdiv[idx]);
+			break;
+		case SR_CONF_PROBE_COUPLING:
+			*data = g_variant_new_int32((int32_t)devc->dso_coupling[idx]);
+			break;
+		case SR_CONF_TRIGGER_VALUE:
+			*data = g_variant_new_int32((int32_t)devc->dso_trig_value[idx]);
+			break;
+		case SR_CONF_PROBE_OFFSET:
+			*data = g_variant_new_uint16(devc->dso_offset[idx]);
+			break;
+		case SR_CONF_PROBE_HW_OFFSET:
+			*data = g_variant_new_uint16(devc->dso_hw_offset[idx]);
+			break;
+		case SR_CONF_PROBE_FACTOR:
+			*data = g_variant_new_uint64(devc->dso_vfactor[idx]);
+			break;
+		case SR_CONF_PROBE_MAP_DEFAULT:
+			*data = g_variant_new_boolean(TRUE);
+			break;
+		case SR_CONF_PROBE_MAP_UNIT:
+			*data = g_variant_new_string(dso_map_units[0]);
+			break;
+		case SR_CONF_PROBE_MAP_MIN:
+			*data = g_variant_new_double(-5.0);
+			break;
+		case SR_CONF_PROBE_MAP_MAX:
+			*data = g_variant_new_double(5.0);
+			break;
+		}
+		break;
+	}
 	default:
 		return SR_ERR_NA;
 	}
@@ -428,6 +618,74 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_CAPTURE_RATIO:
 		devc->capture_ratio = g_variant_get_uint64(data);
 		break;
+	/* --- DSO device-level config --- */
+	case SR_CONF_TIMEBASE:
+		devc->dso_timebase = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		devc->dso_trig_source = g_variant_get_byte(data);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		devc->dso_trig_slope = g_variant_get_byte(data);
+		break;
+	case SR_CONF_HORIZ_TRIGGERPOS:
+		devc->dso_trig_hrate = g_variant_get_byte(data);
+		break;
+	case SR_CONF_INSTANT:
+		/* Instant mode not implemented in demo; accept silently. */
+		break;
+	case SR_CONF_MAX_HEIGHT:
+		/* Accept but ignore; demo always uses 1X. */
+		break;
+	/* --- DSO per-channel config --- */
+	case SR_CONF_PROBE_VDIV:
+	case SR_CONF_PROBE_COUPLING:
+	case SR_CONF_TRIGGER_VALUE:
+	case SR_CONF_PROBE_OFFSET:
+	case SR_CONF_PROBE_HW_OFFSET:
+	case SR_CONF_PROBE_FACTOR:
+	case SR_CONF_PROBE_MAP_DEFAULT:
+	case SR_CONF_PROBE_MAP_UNIT:
+	case SR_CONF_PROBE_MAP_MIN:
+	case SR_CONF_PROBE_MAP_MAX:
+	{
+		if (!cg)
+			return SR_ERR_CHANNEL_GROUP;
+		ch = cg->channels->data;
+		if (ch->type != SR_CHANNEL_DSO)
+			return SR_ERR_ARG;
+		int idx = ch->index - devc->num_logic_channels
+			- devc->num_analog_channels;
+		if (idx < 0 || idx >= devc->num_dso_channels)
+			return SR_ERR_ARG;
+		switch (key) {
+		case SR_CONF_PROBE_VDIV:
+			devc->dso_vdiv[idx] = g_variant_get_uint64(data);
+			break;
+		case SR_CONF_PROBE_COUPLING:
+			devc->dso_coupling[idx] = (uint8_t)g_variant_get_int32(data);
+			break;
+		case SR_CONF_TRIGGER_VALUE:
+			devc->dso_trig_value[idx] = (uint8_t)g_variant_get_int32(data);
+			break;
+		case SR_CONF_PROBE_OFFSET:
+			devc->dso_offset[idx] = g_variant_get_uint16(data);
+			break;
+		case SR_CONF_PROBE_HW_OFFSET:
+			devc->dso_hw_offset[idx] = g_variant_get_uint16(data);
+			break;
+		case SR_CONF_PROBE_FACTOR:
+			devc->dso_vfactor[idx] = g_variant_get_uint64(data);
+			break;
+		case SR_CONF_PROBE_MAP_DEFAULT:
+		case SR_CONF_PROBE_MAP_UNIT:
+		case SR_CONF_PROBE_MAP_MIN:
+		case SR_CONF_PROBE_MAP_MAX:
+			/* Accept but ignore; demo uses fixed map values. */
+			break;
+		}
+		break;
+	}
 	default:
 		return SR_ERR_NA;
 	}
@@ -451,6 +709,12 @@ static int config_list(uint32_t key, GVariant **data,
 		case SR_CONF_TRIGGER_MATCH:
 			*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
 			break;
+		case SR_CONF_TIMEBASE:
+			*data = std_gvar_array_u64(ARRAY_AND_SIZE(dso_timebases));
+			break;
+		case SR_CONF_MAX_HEIGHT:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_max_heights));
+			break;
 		default:
 			return SR_ERR_NA;
 		}
@@ -466,6 +730,8 @@ static int config_list(uint32_t key, GVariant **data,
 				else
 					*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_analog_channel));
 			}
+			else if (ch->type == SR_CHANNEL_DSO)
+				*data = std_gvar_array_u32(ARRAY_AND_SIZE(devopts_cg_dso_channel));
 			else
 				return SR_ERR_BUG;
 			break;
@@ -480,6 +746,21 @@ static int config_list(uint32_t key, GVariant **data,
 				*data = g_variant_new_strv(ARRAY_AND_SIZE(analog_pattern_str));
 			else
 				return SR_ERR_BUG;
+			break;
+		case SR_CONF_PROBE_VDIV:
+			if (ch->type != SR_CHANNEL_DSO)
+				return SR_ERR_ARG;
+			*data = std_gvar_array_u64(ARRAY_AND_SIZE(dso_vdivs));
+			break;
+		case SR_CONF_PROBE_COUPLING:
+			if (ch->type != SR_CHANNEL_DSO)
+				return SR_ERR_ARG;
+			*data = std_gvar_array_i32(ARRAY_AND_SIZE(dso_couplings));
+			break;
+		case SR_CONF_PROBE_MAP_UNIT:
+			if (ch->type != SR_CHANNEL_DSO)
+				return SR_ERR_ARG;
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
 			break;
 		default:
 			return SR_ERR_NA;
@@ -501,6 +782,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	devc = sdi->priv;
 	devc->sent_samples = 0;
 	devc->sent_frame_samples = 0;
+	devc->dso_sent_samples = 0;
 
 	/* Setup triggers */
 	if ((trigger = sr_session_trigger_get(sdi->session))) {
@@ -592,6 +874,12 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 	if (devc->stl) {
 		soft_trigger_logic_free(devc->stl);
 		devc->stl = NULL;
+	}
+
+	/* Free DSO scratch buffer (re-allocated on next send_dso_packet). */
+	if (devc->dso_buf) {
+		g_free(devc->dso_buf);
+		devc->dso_buf = NULL;
 	}
 
 	return SR_OK;

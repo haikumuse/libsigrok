@@ -43,6 +43,17 @@
 #define DEFAULT_ANALOG_AMPLITUDE		10
 #define DEFAULT_ANALOG_OFFSET			0.
 
+/* DSO defaults (ported from PXView fork demo). */
+#define DEFAULT_NUM_DSO_CHANNELS		2
+#define DSO_PACKET_LEN			20000
+#define DSO_SAMPLE_BITS			8
+#define DSO_DEFAULT_VDIV			1000
+#define DSO_DEFAULT_HW_OFFSET		128
+#define DSO_DEFAULT_OFFSET			128
+#define DSO_DEFAULT_TRIG_VAL		128
+#define DSO_DEFAULT_COUPLING		1  /* SR_DC_COUPLING */
+#define DSO_MAX_CHANNELS			16
+
 /* Logic patterns we can generate. */
 enum logic_pattern_type {
 	/**
@@ -142,6 +153,29 @@ struct dev_context {
 	uint64_t capture_ratio;
 	gboolean trigger_fired;
 	struct soft_trigger_logic *stl;
+	/* DSO */
+	int32_t num_dso_channels;
+	size_t enabled_dso_channels;
+	uint64_t dso_timebase;
+	uint64_t dso_max_timebase;
+	uint64_t dso_min_timebase;
+	uint8_t dso_unit_bits;
+	uint32_t dso_ref_min;
+	uint32_t dso_ref_max;
+	uint8_t dso_trig_hrate;   /* horizontal trigger position percentage */
+	uint8_t dso_trig_source;
+	uint8_t dso_trig_slope;
+	/* per-channel DSO config (indexed by DSO channel 0..n) */
+	uint64_t dso_vdiv[DSO_MAX_CHANNELS];
+	uint64_t dso_vfactor[DSO_MAX_CHANNELS];
+	uint16_t dso_offset[DSO_MAX_CHANNELS];
+	uint16_t dso_hw_offset[DSO_MAX_CHANNELS];
+	uint8_t dso_coupling[DSO_MAX_CHANNELS];
+	uint8_t dso_trig_value[DSO_MAX_CHANNELS];
+	gboolean dso_enabled[DSO_MAX_CHANNELS];
+	/* DSO data buffer */
+	uint8_t *dso_buf;
+	uint64_t dso_sent_samples;
 };
 
 struct analog_gen {
@@ -163,5 +197,6 @@ struct analog_gen {
 SR_PRIV void demo_generate_analog_pattern(struct dev_context *devc);
 SR_PRIV void demo_free_analog_pattern(struct dev_context *devc);
 SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data);
+SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi);
 
 #endif

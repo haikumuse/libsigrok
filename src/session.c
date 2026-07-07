@@ -1035,6 +1035,7 @@ static void datafeed_dump(const struct sr_datafeed_packet *packet)
 {
 	const struct sr_datafeed_logic *logic;
 	const struct sr_datafeed_analog *analog;
+	const struct sr_datafeed_dso *dso;
 
 	/* Please use the same order as in libsigrok.h. */
 	switch (packet->type) {
@@ -1065,6 +1066,11 @@ static void datafeed_dump(const struct sr_datafeed_packet *packet)
 		analog = packet->payload;
 		sr_dbg("bus: Received SR_DF_ANALOG packet (%d samples).",
 		       analog->num_samples);
+		break;
+	case SR_DF_DSO:
+		dso = packet->payload;
+		sr_dbg("bus: Received SR_DF_DSO packet (%d samples).",
+		       dso->num_samples);
 		break;
 	default:
 		sr_dbg("bus: Received unknown packet type: %d.", packet->type);
@@ -1519,6 +1525,8 @@ SR_API int sr_packet_copy(const struct sr_datafeed_packet *packet,
 	struct sr_analog_encoding *encoding_copy;
 	struct sr_analog_meaning *meaning_copy;
 	struct sr_analog_spec *spec_copy;
+	const struct sr_datafeed_dso *dso;
+	struct sr_datafeed_dso *dso_copy;
 	uint8_t *payload;
 
 	*copy = g_malloc0(sizeof(struct sr_datafeed_packet));
@@ -1579,6 +1587,20 @@ SR_API int sr_packet_copy(const struct sr_datafeed_packet *packet,
 		analog_copy->spec = spec_copy;
 		(*copy)->payload = analog_copy;
 		break;
+	case SR_DF_DSO:
+		dso = packet->payload;
+		dso_copy = g_malloc(sizeof(*dso_copy));
+		*dso_copy = *dso;
+		if (dso->data && dso->num_samples > 0 && dso->sample_bits > 0) {
+			size_t nbytes = (size_t)dso->num_samples
+				* ((dso->sample_bits + 7) / 8);
+			dso_copy->data = g_malloc(nbytes);
+			memcpy(dso_copy->data, dso->data, nbytes);
+		} else {
+			dso_copy->data = NULL;
+		}
+		(*copy)->payload = dso_copy;
+		break;
 	default:
 		sr_err("Unknown packet type %d", packet->type);
 		return SR_ERR;
@@ -1592,6 +1614,7 @@ SR_API void sr_packet_free(struct sr_datafeed_packet *packet)
 	const struct sr_datafeed_meta *meta;
 	const struct sr_datafeed_logic *logic;
 	const struct sr_datafeed_analog *analog;
+	const struct sr_datafeed_dso *dso;
 	struct sr_config *src;
 	GSList *l;
 
@@ -1626,6 +1649,11 @@ SR_API void sr_packet_free(struct sr_datafeed_packet *packet)
 		g_slist_free(analog->meaning->channels);
 		g_free(analog->meaning);
 		g_free(analog->spec);
+		g_free((void *)packet->payload);
+		break;
+	case SR_DF_DSO:
+		dso = packet->payload;
+		g_free(dso->data);
 		g_free((void *)packet->payload);
 		break;
 	default:

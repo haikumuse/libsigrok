@@ -95,6 +95,17 @@ enum sr_valid_code {
 #define SR_MHZ(n) ((n) * UINT64_C(1000000))
 #define SR_GHZ(n) ((n) * UINT64_C(1000000000))
 
+/* Voltage helpers (V, mV). Used by DSO vdiv lists. */
+#define SR_V(n)  ((uint64_t)(n) * UINT64_C(1000))
+#define SR_mV(n) ((uint64_t)(n))
+
+/* Time-base helpers (ns, us, ms). Used by DSO timebase lists.
+ * Note: SR_NS is nanoseconds (literal value), SR_US is microseconds,
+ * SR_MS is milliseconds. These are duration units, not samplerate. */
+#define SR_NS(n) ((uint64_t)(n))
+#define SR_US(n) ((uint64_t)(n) * UINT64_C(1000))
+#define SR_MS(n) ((uint64_t)(n) * UINT64_C(1000000))
+
 #define SR_HZ_TO_NS(n) (UINT64_C(1000000000) / (n))
 
 /** libsigrok loglevels. */
@@ -176,6 +187,8 @@ enum sr_packettype {
 	SR_DF_FRAME_END,
 	/** Payload is struct sr_datafeed_analog. */
 	SR_DF_ANALOG,
+	/** Payload is struct sr_datafeed_dso. */
+	SR_DF_DSO,
 
 	/* Update datafeed_dump() (session.c) upon changes! */
 };
@@ -559,6 +572,19 @@ struct sr_datafeed_analog {
 	struct sr_analog_spec *spec;
 };
 
+/** DSO datafeed payload for type SR_DF_DSO. */
+struct sr_datafeed_dso {
+	void *data;
+	uint32_t num_samples;
+	uint8_t trig_flag;
+	uint8_t trig_ch;
+	uint8_t en_ch_num;
+	uint8_t sample_bits;
+	int16_t trig_offset;
+	uint32_t packet_len;
+	uint32_t samplerate_tog;
+};
+
 struct sr_analog_encoding {
 	uint8_t unitsize;
 	gboolean is_signed;
@@ -669,6 +695,8 @@ enum sr_channeltype {
 	SR_CHANNEL_LOGIC = 10000,
 	/** Channel type is analog channel. */
 	SR_CHANNEL_ANALOG,
+	/** Channel type is DSO (oscilloscope) channel. */
+	SR_CHANNEL_DSO,
 };
 
 /** Information on single channel. */
@@ -1345,6 +1373,28 @@ enum sr_configkey {
 	SR_CONF_THRESHOLD,
 	SR_CONF_VTH,
 	SR_CONF_HW_DEPTH,
+
+	/* DSO per-channel config keys (ported from PXView fork libsigrok).
+	 * These are per-channel (probe-level) keys, distinct from the
+	 * device-wide SR_CONF_VDIV/SR_CONF_COUPLING above. Used by the
+	 * demo driver and PXLogic driver for oscilloscope channel config.
+	 * Values match the historical PXView fork libsigrok assignments so
+	 * PXView code (dsvdef.h stubs) and libsigrok stay in sync. */
+	SR_CONF_PROBE_VDIV = 60035,
+	SR_CONF_PROBE_COUPLING,       /* 60036 */
+	SR_CONF_TRIGGER_VALUE,        /* 60037 */
+	SR_CONF_MAX_TIMEBASE,         /* 60038 */
+	SR_CONF_MIN_TIMEBASE,         /* 60039 */
+	SR_CONF_PROBE_OFFSET = 60042,
+	SR_CONF_PROBE_HW_OFFSET,      /* 60043 */
+	SR_CONF_PROBE_MAP_DEFAULT,    /* 60044 */
+	SR_CONF_REF_MIN,              /* 60045 */
+	SR_CONF_REF_MAX,              /* 60046 */
+	SR_CONF_UNIT_BITS,            /* 60047 */
+	/* SR_CONF_PROBE_FACTOR already exists in upstream enum (line ~1254). */
+	SR_CONF_PROBE_MAP_UNIT = 60059,
+	SR_CONF_PROBE_MAP_MIN,        /* 60060 */
+	SR_CONF_PROBE_MAP_MAX,        /* 60061 */
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };

@@ -572,6 +572,95 @@ do_send:
 	}
 }
 
+/*
+ * Send one DSO frame (one SR_DF_DSO packet) for the demo device.
+ *
+ * Generates random waveform data (range ~68..187, around the 128 mid value
+ * for 8-bit DSO samples) for each enabled DSO channel, interleaved as
+ * [ch0_s0, ch1_s0, ch0_s1, ch1_s1, ...] which matches the layout expected
+ * by DsoSnapshot::append_data().
+ *
+ * After sending the packet the acquisition is stopped — DSO mode delivers
+ * one complete frame per acquisition (single-shot). The caller may restart
+ * acquisition for the next frame (repeat/loop mode handled by the upper
+ * CaptureManager layer).
+ */
+SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_dso dso;
+	struct sr_channel *ch;
+	GSList *l;
+	uint8_t en_ch_num;
+	uint8_t *p;
+	uint64_t i;
+	int ch_idx;
+
+	if (!sdi || !sdi->priv)
+		return SR_ERR_ARG;
+
+	devc = sdi->priv;
+
+	/* Count enabled DSO channels. */
+	en_ch_num = 0;
+	for (l = sdi->channels; l; l = l->next) {
+		ch = l->data;
+		if (ch && ch->type == SR_CHANNEL_DSO && ch->enabled)
+			en_ch_num++;
+	}
+	if (en_ch_num == 0)
+		return SR_ERR;
+
+	/* (Re)allocate the DSO buffer if needed. */
+	if (!devc->dso_buf) {
+		devc->dso_buf = g_malloc(DSO_PACKET_LEN * en_ch_num);
+		if (!devc->dso_buf)
+			return SR_ERR_MALLOC;
+	}
+
+	/*
+	 * Fill interleaved samples. Each channel gets the same random pattern
+	 * offset by channel index so the traces look distinct. The data range
+	 * 68..187 straddles the 128 mid-scale used by 8-bit DSO rendering.
+	 */
+	p = devc->dso_buf;
+	for (i = 0; i < DSO_PACKET_LEN; i++) {
+		ch_idx = 0;
+		for (l = sdi->channels; l; l = l->next) {
+			ch = l->data;
+			if (!ch || ch->type != SR_CHANNEL_DSO || !ch->enabled)
+				continue;
+			/* Per-channel variation: shift + small phase offset. */
+			uint8_t v = (uint8_t)((rand() % 120) + 68);
+			/* Apply per-channel trigger-value offset so traces don't overlap. */
+			if (ch_idx < DSO_MAX_CHANNELS)
+				v = (uint8_t)(v + (uint8_t)(devc->dso_trig_value[ch_idx] - 128));
+			*p++ = v;
+			ch_idx++;
+		}
+	}
+
+	/* Build and send the DSO packet. */
+	dso.data = devc->dso_buf;
+	dso.num_samples = DSO_PACKET_LEN;
+	dso.trig_flag = 1;            /* Trigger found in this packet. */
+	dso.trig_ch = 0;              /* First enabled DSO channel. */
+	dso.en_ch_num = en_ch_num;
+	dso.sample_bits = devc->dso_unit_bits;
+	dso.trig_offset = (int16_t)(DSO_PACKET_LEN / 2);  /* Trigger at center. */
+	dso.packet_len = DSO_PACKET_LEN * en_ch_num;
+	dso.samplerate_tog = (uint32_t)devc->cur_samplerate;
+
+	packet.type = SR_DF_DSO;
+	packet.payload = &dso;
+	sr_session_send(sdi, &packet);
+
+	devc->dso_sent_samples += DSO_PACKET_LEN;
+
+	return SR_OK;
+}
+
 /* Callback handling data */
 SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 {
@@ -592,6 +681,32 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 
 	sdi = cb_data;
 	devc = sdi->priv;
+
+	/*
+	 * DSO mode: send one complete frame per acquisition tick, then stop.
+	 * DSO channels coexist with logic/analog in the channel list, but in
+	 * DSO work mode only DSO channels are enabled — detect that and skip
+	 * the streaming logic/analog path entirely.
+	 */
+	if (devc->num_dso_channels > 0) {
+		gboolean has_enabled_dso = FALSE;
+		gboolean has_enabled_other = FALSE;
+		for (GSList *l = sdi->channels; l; l = l->next) {
+			struct sr_channel *ch = l->data;
+			if (!ch || !ch->enabled)
+				continue;
+			if (ch->type == SR_CHANNEL_DSO)
+				has_enabled_dso = TRUE;
+			else
+				has_enabled_other = TRUE;
+		}
+		if (has_enabled_dso && !has_enabled_other) {
+			/* Pure DSO acquisition. */
+			demo_send_dso_packet(sdi);
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+	}
 
 	/* Just in case. */
 	if (devc->cur_samplerate <= 0

@@ -785,6 +785,9 @@ static int parse_header_var(struct context *inc, char *contents)
 		/* TODO: Use proper 'digits' value for this input module. */
 		vcd_ch->submit_digits = is_real ? 2 : 0;
 		break;
+	case SR_CHANNEL_DSO:
+		/* VCD input does not handle DSO channels. */
+		break;
 	}
 	inc->vcdsignals++;
 	sr_spew("VCD signal %zu '%s' ID '%s' (size %zu), sr type %s, idx %zu.",
