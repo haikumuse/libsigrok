@@ -1395,6 +1395,8 @@ enum sr_configkey {
 	SR_CONF_PROBE_MAP_UNIT = 60059,
 	SR_CONF_PROBE_MAP_MIN,        /* 60060 */
 	SR_CONF_PROBE_MAP_MAX,        /* 60061 */
+	SR_CONF_PROBE_CONFIGS,        /* 60062 — probe config key list for
+	                               * ProbeOptions binding (DAQ/DSO map_*). */
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };

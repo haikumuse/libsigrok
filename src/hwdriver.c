@@ -354,6 +354,8 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Probe map min", NULL},
 	{SR_CONF_PROBE_MAP_MAX, SR_T_FLOAT, "probe_map_max",
 		"Probe map max", NULL},
+	{SR_CONF_PROBE_CONFIGS, SR_T_INT32, "probe_configs",
+		"Probe configs", NULL},
 	{SR_CONF_DEVICE_OPTIONS, SR_T_UINT64, "device_options",
 		"Device options", NULL},
 	{SR_CONF_DEVICE_SESSIONS, SR_T_UINT64, "device_sessions",

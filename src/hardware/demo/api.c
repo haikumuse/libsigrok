@@ -83,6 +83,8 @@ static const uint32_t devopts[] = {
 	SR_CONF_REF_MIN | SR_CONF_GET,
 	SR_CONF_REF_MAX | SR_CONF_GET,
 	SR_CONF_MAX_HEIGHT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* Probe config key list (for ProbeOptions binding — DAQ/DSO map_*). */
+	SR_CONF_PROBE_CONFIGS | SR_CONF_LIST,
 };
 
 static const uint32_t devopts_cg_logic[] = {
@@ -99,6 +101,11 @@ static const uint32_t devopts_cg_analog_channel[] = {
 	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_AMPLITUDE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	/* DAQ probe map (data logger scale mapping). */
+	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_MAP_MAX | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint32_t devopts_cg_dso_channel[] = {
@@ -152,6 +159,17 @@ static const char *dso_max_heights[] = { "1X", "2X", "3X", "4X", "5X" };
 
 /* DSO probe map units. */
 static const char *dso_map_units[] = { "V", "A", "°C", "°F", "g", "m", "m/s" };
+
+/* Probe config keys exposed via SR_CONF_PROBE_CONFIGS for ProbeOptions
+ * binding. Applies to both DSO and ANALOG (DAQ) channels — the binding
+ * only creates widgets for MAP_* keys, so VDIV/COUPLING are included
+ * harmlessly for DSO mode. */
+static const int32_t probe_configs[] = {
+	SR_CONF_PROBE_MAP_DEFAULT,
+	SR_CONF_PROBE_MAP_UNIT,
+	SR_CONF_PROBE_MAP_MIN,
+	SR_CONF_PROBE_MAP_MAX,
+};
 
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
@@ -475,29 +493,44 @@ static int config_get(uint32_t key, GVariant **data,
 		if (!cg)
 			return SR_ERR_CHANNEL_GROUP;
 		ch = cg->channels->data;
-		if (ch->type != SR_CHANNEL_DSO)
+		/* MAP keys apply to both DSO (oscilloscope) and ANALOG (DAQ)
+		 * channels. DSO-only keys (VDIV/COUPLING/etc.) are rejected
+		 * below; MAP keys fall through to the shared default-value
+		 * branch so DAQ mode gets the same scale-mapping controls. */
+		gboolean is_dso = (ch->type == SR_CHANNEL_DSO);
+		gboolean is_analog = (ch->type == SR_CHANNEL_ANALOG);
+		if (!is_dso && !is_analog)
 			return SR_ERR_ARG;
-		int idx = ch->index - devc->num_logic_channels
-			- devc->num_analog_channels;
-		if (idx < 0 || idx >= devc->num_dso_channels)
-			return SR_ERR_ARG;
+		int idx = -1;
+		if (is_dso) {
+			idx = ch->index - devc->num_logic_channels
+				- devc->num_analog_channels;
+			if (idx < 0 || idx >= devc->num_dso_channels)
+				return SR_ERR_ARG;
+		}
 		switch (key) {
 		case SR_CONF_PROBE_VDIV:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_uint64(devc->dso_vdiv[idx]);
 			break;
 		case SR_CONF_PROBE_COUPLING:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_int32((int32_t)devc->dso_coupling[idx]);
 			break;
 		case SR_CONF_TRIGGER_VALUE:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_int32((int32_t)devc->dso_trig_value[idx]);
 			break;
 		case SR_CONF_PROBE_OFFSET:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_uint16(devc->dso_offset[idx]);
 			break;
 		case SR_CONF_PROBE_HW_OFFSET:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_uint16(devc->dso_hw_offset[idx]);
 			break;
 		case SR_CONF_PROBE_FACTOR:
+			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_uint64(devc->dso_vfactor[idx]);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
@@ -662,29 +695,41 @@ static int config_set(uint32_t key, GVariant *data,
 		if (!cg)
 			return SR_ERR_CHANNEL_GROUP;
 		ch = cg->channels->data;
-		if (ch->type != SR_CHANNEL_DSO)
+		/* MAP keys apply to DSO and ANALOG (DAQ) channels. */
+		gboolean is_dso = (ch->type == SR_CHANNEL_DSO);
+		gboolean is_analog = (ch->type == SR_CHANNEL_ANALOG);
+		if (!is_dso && !is_analog)
 			return SR_ERR_ARG;
-		int idx = ch->index - devc->num_logic_channels
-			- devc->num_analog_channels;
-		if (idx < 0 || idx >= devc->num_dso_channels)
-			return SR_ERR_ARG;
+		int idx = -1;
+		if (is_dso) {
+			idx = ch->index - devc->num_logic_channels
+				- devc->num_analog_channels;
+			if (idx < 0 || idx >= devc->num_dso_channels)
+				return SR_ERR_ARG;
+		}
 		switch (key) {
 		case SR_CONF_PROBE_VDIV:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_vdiv[idx] = g_variant_get_uint64(data);
 			break;
 		case SR_CONF_PROBE_COUPLING:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_coupling[idx] = (uint8_t)g_variant_get_int32(data);
 			break;
 		case SR_CONF_TRIGGER_VALUE:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_trig_value[idx] = (uint8_t)g_variant_get_int32(data);
 			break;
 		case SR_CONF_PROBE_OFFSET:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_offset[idx] = g_variant_get_uint16(data);
 			break;
 		case SR_CONF_PROBE_HW_OFFSET:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_hw_offset[idx] = g_variant_get_uint16(data);
 			break;
 		case SR_CONF_PROBE_FACTOR:
+			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_vfactor[idx] = g_variant_get_uint64(data);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
@@ -724,6 +769,13 @@ static int config_list(uint32_t key, GVariant **data,
 			break;
 		case SR_CONF_MAX_HEIGHT:
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_max_heights));
+			break;
+		case SR_CONF_PROBE_CONFIGS:
+			/* Returns the list of probe-config keys supported by
+			 * this driver. ProbeOptions binding iterates this list
+			 * and creates widgets for MAP_* keys — used by both
+			 * DSO (oscilloscope) and ANALOG (DAQ) channels. */
+			*data = std_gvar_array_i32(ARRAY_AND_SIZE(probe_configs));
 			break;
 		default:
 			return SR_ERR_NA;
@@ -768,10 +820,11 @@ static int config_list(uint32_t key, GVariant **data,
 			*data = std_gvar_array_i32(ARRAY_AND_SIZE(dso_couplings));
 			break;
 		case SR_CONF_PROBE_MAP_UNIT:
-			if (ch->type != SR_CHANNEL_DSO)
-				return SR_ERR_ARG;
-			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
-			break;
+		/* MAP_UNIT applies to both DSO and ANALOG (DAQ) channels. */
+		if (ch->type != SR_CHANNEL_DSO && ch->type != SR_CHANNEL_ANALOG)
+			return SR_ERR_ARG;
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
+		break;
 		default:
 			return SR_ERR_NA;
 		}
