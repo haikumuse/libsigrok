@@ -22,12 +22,17 @@
 
 #include "protocol.h"
 
-/* htole16: on Linux/macOS the system <endian.h>/<sys/_endian.h> provides it
- * via __uint16_identity. On Windows (MinGW) <endian.h> lacks htole16, so we
- * provide a manual fallback below. Including <endian.h> on non-Windows
+/* htole16: on Linux glibc <endian.h> provides it via __uint16_identity macro.
+ * On macOS it is provided by <libkern/OSByteOrder.h> via <sys/_endian.h>.
+ * On Windows (MinGW) <endian.h> lacks htole16, so we provide a manual
+ * fallback below. Including the platform endian header on non-Windows
  * ensures htole16 is declared even if no other header pulls it in. */
 #ifndef _WIN32
+#ifdef __APPLE__
+#include <libkern/OSByteOrder.h>
+#else
 #include <endian.h>
+#endif
 #endif
 
 static int slogic16U3_remote_test_mode(const struct sr_dev_inst *sdi, uint32_t mode);
