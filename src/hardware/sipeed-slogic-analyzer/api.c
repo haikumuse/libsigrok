@@ -22,6 +22,14 @@
 
 #include "protocol.h"
 
+/* htole16: on Linux/macOS the system <endian.h>/<sys/_endian.h> provides it
+ * via __uint16_identity. On Windows (MinGW) <endian.h> lacks htole16, so we
+ * provide a manual fallback below. Including <endian.h> on non-Windows
+ * ensures htole16 is declared even if no other header pulls it in. */
+#ifndef _WIN32
+#include <endian.h>
+#endif
+
 static int slogic16U3_remote_test_mode(const struct sr_dev_inst *sdi, uint32_t mode);
 
 static const uint32_t scanopts[] = {
@@ -802,10 +810,10 @@ int slogic_soft_trigger_raw_data(void *data, size_t len,
 	return ret;
 }
 
-// htole16: glibc (Linux) and Darwin both already define htole16 via their
-// <endian.h>/<libkern/OSByteOrder.h> headers. Redefining it here causes
-// "redefinition of '__uint16_identity'" on Linux. MinGW's <endian.h> lacks
-// htole16, so only define it on Windows.
+// htole16: host-to-little-endian 16-bit conversion.
+// - Linux glibc <endian.h> defines htole16 via __uint16_identity macro.
+// - macOS <libkern/OSByteOrder.h> provides htole16 through <sys/_endian.h>.
+// - MinGW (Windows) lacks htole16, so provide a manual fallback there.
 #ifdef _WIN32
 static inline uint16_t htole16(uint16_t value)
 {
