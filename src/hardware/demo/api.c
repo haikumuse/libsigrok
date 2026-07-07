@@ -218,7 +218,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->dso_sent_samples = 0;
 	for (i = 0; i < num_dso_channels && i < DSO_MAX_CHANNELS; i++) {
 		devc->dso_vdiv[i] = DSO_DEFAULT_VDIV;
-		devc->dso_vfactor[i] = DSO_DEFAULT_VDIV;
+		devc->dso_vfactor[i] = 1;  /* 1x probe attenuation factor (not vdiv). */
 		devc->dso_offset[i] = DSO_DEFAULT_OFFSET;
 		devc->dso_hw_offset[i] = DSO_DEFAULT_HW_OFFSET;
 		devc->dso_coupling[i] = DSO_DEFAULT_COUPLING;
@@ -433,7 +433,17 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(FALSE);
 		break;
 	case SR_CONF_HW_DEPTH:
-		*data = g_variant_new_uint64(DSO_PACKET_LEN);
+		/* HW_DEPTH depends on what the frontend is asking about:
+		 * - DSO channels: DSO_PACKET_LEN (20k samples per frame)
+		 * - Logic/Analog: limit_samples (set by frontend via SR_CONF_LIMIT_SAMPLES)
+		 * The frontend queries HW_DEPTH to size snapshot buffers; returning
+		 * DSO_PACKET_LEN for all modes would undersize logic/analog buffers. */
+		if (devc->num_dso_channels > 0 && devc->num_logic_channels == 0
+				&& devc->num_analog_channels == 0)
+			*data = g_variant_new_uint64(DSO_PACKET_LEN);
+		else
+			*data = g_variant_new_uint64(devc->limit_samples > 0
+					? devc->limit_samples : SR_MHZ(1));
 		break;
 	case SR_CONF_VLD_CH_NUM:
 		*data = g_variant_new_int32(devc->num_dso_channels);
