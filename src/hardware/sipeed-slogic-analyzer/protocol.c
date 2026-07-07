@@ -340,8 +340,9 @@ static int train_bulk_in_transfer(struct dev_context *devc,
 		 ALIGN_SIZE); // 32kiB > 125ms * 1MHZ * 2ch
 
 	cur_transfer_duration = try_transfer_nbytes / BpMs;
-	sr_dbg("Choose: receive %u bytes per %ums :)", try_transfer_nbytes,
-	       cur_transfer_duration);
+	sr_dbg("Choose: receive %llu bytes per %ums :)",
+		(unsigned long long)try_transfer_nbytes,
+		cur_transfer_duration);
 
 	// Assign
 	devc->per_transfer_duration = cur_transfer_duration;
@@ -372,9 +373,11 @@ SR_PRIV int sipeed_slogic_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->samples_got_nbytes = 0;
 	devc->samples_need_nbytes =
 		devc->cur_limit_samples * devc->cur_samplechannel / 8;
-	sr_info("Need %ux %uch@%uMHz in %ums.", devc->cur_limit_samples,
-		devc->cur_samplechannel, devc->cur_samplerate / SR_MHZ(1),
-		1000 * devc->cur_limit_samples / devc->cur_samplerate);
+	sr_info("Need %llux %uch@%lluMHz in %llums.",
+		(unsigned long long)devc->cur_limit_samples,
+		(unsigned int)devc->cur_samplechannel,
+		(unsigned long long)(devc->cur_samplerate / SR_MHZ(1)),
+		(unsigned long long)(1000 * devc->cur_limit_samples / devc->cur_samplerate));
 
 	if ((ret = train_bulk_in_transfer(devc, usb->devhdl)) != SR_OK) {
 		sr_err("Failed to train bulk_in_transfer!`");
@@ -400,14 +403,14 @@ SR_PRIV int sipeed_slogic_acquisition_start(const struct sr_dev_inst *sdi)
 		       devc->samples_need_nbytes) {
 		uint8_t *dev_buf = malloc(devc->per_transfer_nbytes);
 		if (!dev_buf) {
-			sr_dbg("Failed to allocate memory[%d]",
+			sr_dbg("Failed to allocate memory[%zu]",
 			       devc->num_transfers_used);
 			break;
 		}
 
 		struct libusb_transfer *transfer = libusb_alloc_transfer(0);
 		if (!transfer) {
-			sr_dbg("Failed to allocate transfer[%d]",
+			sr_dbg("Failed to allocate transfer[%zu]",
 			       devc->num_transfers_used);
 			free(dev_buf);
 			break;
@@ -415,7 +418,8 @@ SR_PRIV int sipeed_slogic_acquisition_start(const struct sr_dev_inst *sdi)
 
 		libusb_fill_bulk_transfer(
 			transfer, usb->devhdl, devc->model->ep_in, dev_buf,
-			devc->per_transfer_nbytes, receive_transfer, sdi,
+			devc->per_transfer_nbytes, receive_transfer,
+			(void *)sdi,
 			(TRANSFERS_DURATION_TOLERANCE + 1) *
 				devc->per_transfer_duration *
 				(devc->num_transfers_used + 2));
@@ -424,7 +428,7 @@ SR_PRIV int sipeed_slogic_acquisition_start(const struct sr_dev_inst *sdi)
 		transfer->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
 		ret = libusb_submit_transfer(transfer);
 		if (ret) {
-			sr_dbg("Failed to submit transfer[%d]: %s.",
+			sr_dbg("Failed to submit transfer[%zu]: %s.",
 			       devc->num_transfers_used,
 			       libusb_error_name(ret));
 			libusb_free_transfer(transfer);
@@ -433,7 +437,7 @@ SR_PRIV int sipeed_slogic_acquisition_start(const struct sr_dev_inst *sdi)
 		devc->transfers[devc->num_transfers_used] = transfer;
 		devc->num_transfers_used += 1;
 	}
-	sr_dbg("Submited %u transfers", devc->num_transfers_used);
+	sr_dbg("Submited %zu transfers", devc->num_transfers_used);
 
 	if (!devc->num_transfers_used) {
 		return SR_ERR_IO;

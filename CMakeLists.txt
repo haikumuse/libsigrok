@@ -169,7 +169,13 @@ endif()
 # annotation would cause MinGW ld to silently disable --export-all-symbols.
 target_compile_definitions(libsigrok PRIVATE
     HAVE_LIBUSB_1_0
-    HAVE_LIBUSB_OS_HANDLE
+    # HAVE_LIBUSB_OS_HANDLE — only defined when building against the project's
+    # internal libusb submodule (event-abstraction-v4 fork), which adds the
+    # `libusb_os_handle` typedef in libusb.h. The system libusb 1.0.x (used on
+    # Linux/macOS CI) lacks this type — usb.c has a
+    # `#if !HAVE_LIBUSB_OS_HANDLE typedef int libusb_os_handle; #endif` fallback
+    # that activates when this macro is undefined.
+    $<$<BOOL:${LIBUSB_1_INTERNAL}>:HAVE_LIBUSB_OS_HANDLE>
     HAVE_SERIAL_COMM
     HAVE_ZLIB
     HAVE_LIBZIP
