@@ -50,6 +50,17 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <ctype.h>
+
+/*
+ * macOS <sys/_endian.h> defines BYTE_ORDER as a macro (expands to
+ * __DARWIN_LITTLE_ENDIAN = 1234). This conflicts with the enum value
+ * BYTE_ORDER = 5 below, causing "expected identifier" errors.
+ * Undefine the system macro so the enum identifier takes precedence.
+ * The system BYTE_ORDER macro is not used anywhere in this file.
+ */
+#ifdef __APPLE__
+#undef BYTE_ORDER
+#endif
 #include <string.h>
 #include <stdint.h>
 #include <math.h>

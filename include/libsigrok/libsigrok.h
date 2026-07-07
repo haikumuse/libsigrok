@@ -473,6 +473,17 @@ struct sr_trigger_match {
  */
 struct sr_context;
 
+/** Hotplug event codes for sr_listen_hotplug callback. */
+enum sr_hotplug_event {
+	SR_HOTPLUG_ATTACH = 0,
+	SR_HOTPLUG_DETACH = 1,
+};
+
+/** Hotplug callback signature.
+ * @param event SR_HOTPLUG_ATTACH or SR_HOTPLUG_DETACH.
+ * @param user_data User pointer passed to sr_listen_hotplug. */
+typedef void (*sr_hotplug_callback)(int event, void *user_data);
+
 /**
  * @struct sr_session
  * Opaque structure representing a libsigrok session.
@@ -507,10 +518,35 @@ struct sr_datafeed_meta {
 	GSList *config;
 };
 
+/**
+ * Logic data format.
+ *
+ * LA_SPLIT_DATA: sample-interleaved (upstream libsigrok 0.6 format).
+ *   Each sample group occupies `unitsize = ceil(channel_num/8)` bytes.
+ *   Sample s, channel ch bit = data[s*unitsize + ch/8] bit (ch%8).
+ *   This is the default for upstream sigrok drivers (fx2lafw, demo, ...).
+ *
+ * LA_CROSS_DATA: channel-block (PXLogic/DSLogic fork format, "cross data").
+ *   Hardware DMA writes 64 samples for channel 0, then 64 samples for
+ *   channel 1, ..., then 64 samples for channel N-1, then repeats.
+ *   No deinterleave is performed in the driver — the raw USB buffer is
+ *   forwarded as-is. Conversion to per-channel chunk tree is done by
+ *   LogicSnapshot::append_cross_payload on the receive side.
+ *   unitsize is unused for this format (length is the raw byte count).
+ */
+enum LA_DATA_FORMAT {
+	LA_SPLIT_DATA = 0,
+	LA_CROSS_DATA = 1,
+};
+
 /** Logic datafeed payload for type SR_DF_LOGIC. */
 struct sr_datafeed_logic {
 	uint64_t length;
 	uint16_t unitsize;
+	/** Data format. LA_SPLIT_DATA (default) for upstream sigrok drivers,
+	 *  LA_CROSS_DATA for PXLogic/DSLogic fork drivers that forward raw
+	 *  channel-block USB data without deinterleaving. */
+	int format;
 	void *data;
 };
 
@@ -1268,7 +1304,65 @@ enum sr_configkey {
 	SR_CONF_GATE_TIME,
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
+
+	/*--- PXLogic driver extension keys ---------------------------------*/
+	/*
+	 * Keys required by the PXLogic (ch569w) driver, ported from PXView
+	 * fork libsigrok. Fork 60001-60013 values are kept as-is (no conflict
+	 * with upstream 10000-50000 ranges). Fork 30000-range keys are
+	 * reassigned to 60020+ to avoid conflict with upstream's 30000-range
+	 * keys (SR_CONF_PATTERN_MODE=30002, SR_CONF_RLE=30003, etc).
+	 */
+
+	/* Fork 60001-60013: keep original values (no conflict) */
+	SR_CONF_LOOP_MODE = 60001,
+	SR_CONF_EX_TRIGGER_MATCH,
+	SR_CONF_TRIGGER_OUT,
+	SR_CONF_PWM0_EN,
+	SR_CONF_PWM0_FREQ,
+	SR_CONF_PWM0_DUTY,
+	SR_CONF_PWM1_EN,
+	SR_CONF_PWM1_FREQ,
+	SR_CONF_PWM1_DUTY,
+	SR_CONF_STREAM_BUFF,
+	SR_CONF_DISK_CACHE_ENABLE,
+	SR_CONF_DISK_CACHE_PATH,
+	SR_CONF_STREAM_MEM_BUFF,
+
+	/* Fork 30000-range keys reassigned to 60020+ (avoid upstream conflict) */
+	SR_CONF_USB_SPEED = 60020,
+	SR_CONF_USB30_SUPPORT,
+	SR_CONF_INSTANT,
+	SR_CONF_VLD_CH_NUM,
+	SR_CONF_STREAM,
+	SR_CONF_ROLL,
+	SR_CONF_TEST,
+	SR_CONF_OPERATION_MODE,
+	SR_CONF_BUFFER_OPTIONS,
+	SR_CONF_CHANNEL_MODE,
+	SR_CONF_MAX_HEIGHT,
+	SR_CONF_MAX_HEIGHT_VALUE,
+	SR_CONF_THRESHOLD,
+	SR_CONF_VTH,
+	SR_CONF_HW_DEPTH,
+
+	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };
+
+/*
+ * SR_CONF_DEVICE_OPTIONS / SR_CONF_DEVICE_SESSIONS are internal pseudo-keys
+ * (also defined in libsigrok-internal.h). They are NOT regular enum values —
+ * sr_config_list() treats them specially (skips check_key) to query a driver's
+ * full devopts/scanopts arrays. Defined here as macros so external callers
+ * (PXView) use the same value as libsigrok internals.
+ *
+ * NOTE: A previous fork revision incorrectly added these as enum members
+ * (60035/60036), which conflicted with the internal #define (0x7FFF0001),
+ * causing sr_config_list(SR_CONF_DEVICE_OPTIONS) to fail with SR_ERR_ARG
+ * because check_key() could not find key 60035 in sr_key_info_config[].
+ */
+#define SR_CONF_DEVICE_OPTIONS 0x7FFF0001
+#define SR_CONF_DEVICE_SESSIONS 0x7FFF0002
 
 /**
  * Opaque structure representing a libsigrok device instance.
