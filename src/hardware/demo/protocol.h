@@ -143,6 +143,9 @@ struct dev_context {
 	struct analog_pattern *analog_patterns[ARRAY_SIZE(analog_pattern_str)];
 	int32_t num_analog_channels;
 	GHashTable *ch_ag;
+	/* DAQ per-channel probe config (vdiv/coupling for ANALOG channels). */
+	uint64_t analog_vdiv[DSO_MAX_CHANNELS];
+	uint8_t analog_coupling[DSO_MAX_CHANNELS];
 	gboolean avg; /* True if averaging is enabled */
 	uint64_t avg_samples;
 	size_t enabled_logic_channels;
