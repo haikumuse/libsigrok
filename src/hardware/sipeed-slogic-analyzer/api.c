@@ -802,8 +802,11 @@ int slogic_soft_trigger_raw_data(void *data, size_t len,
 	return ret;
 }
 
-// #define __USE_MISC 1
-// #include <endian.h>
+// htole16: glibc (Linux) and Darwin both already define htole16 via their
+// <endian.h>/<libkern/OSByteOrder.h> headers. Redefining it here causes
+// "redefinition of '__uint16_identity'" on Linux. MinGW's <endian.h> lacks
+// htole16, so only define it on Windows.
+#ifdef _WIN32
 static inline uint16_t htole16(uint16_t value)
 {
 	const union {
@@ -816,6 +819,7 @@ static inline uint16_t htole16(uint16_t value)
 		return ((value & 0xFF) << 8) | ((value >> 8) & 0xFF);
 	}
 }
+#endif
 
 static inline void clear_ep(const struct sr_dev_inst *sdi)
 {
