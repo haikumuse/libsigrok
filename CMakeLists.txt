@@ -99,6 +99,12 @@ add_library(libsigrok STATIC ${libsigrok_SOURCES})
 # — the parent CMakeLists.txt's global include_directories(./libsigrok/include)
 # in deps.cmake already points here, so consumers like pxview-data that don't
 # link the libsigrok target still find it.
+#
+# Note: src/version.c defines WANT_LIBSIGROK_GIT_VERSION_H before including
+# libsigrok.h, which triggers the #include <libsigrok/git-version.h> branch.
+# git-version.h is also autoconf-generated (gitignored line 33), so we drop
+# that branch entirely and hardcode the empty suffix — release builds don't
+# need the git commit hash suffix.
 # Values are hardcoded matching libsigrok 0.6.0 (configure.ac:24 AC_INIT) and
 # libtool version 4:1:1 (configure.ac:25-27).
 set(LIBSIGROK_VERSION_H "${CMAKE_CURRENT_SOURCE_DIR}/include/libsigrok/version.h")
@@ -107,12 +113,11 @@ file(WRITE "${LIBSIGROK_VERSION_H}" "\
 #ifndef LIBSIGROK_VERSION_H\n\
 #define LIBSIGROK_VERSION_H\n\
 \n\
-#if defined WANT_LIBSIGROK_GIT_VERSION_H\n\
-#  include <libsigrok/git-version.h>\n\
-#else\n\
-#  undef SR_PACKAGE_VERSION_STRING_SUFFIX\n\
-#  define SR_PACKAGE_VERSION_STRING_SUFFIX \"\"\n\
-#endif\n\
+/* Release build: no git commit hash suffix. (src/version.c defines\n\
+ * WANT_LIBSIGROK_GIT_VERSION_H but we intentionally don't honor it —\n\
+ * git-version.h is also autoconf-generated and we don't run autotools.) */\n\
+#undef SR_PACKAGE_VERSION_STRING_SUFFIX\n\
+#define SR_PACKAGE_VERSION_STRING_SUFFIX \"\"\n\
 \n\
 #define SR_PACKAGE_VERSION_MAJOR 0\n\
 #define SR_PACKAGE_VERSION_MINOR 6\n\
