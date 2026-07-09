@@ -422,6 +422,10 @@ static const uint32_t devopts[] = {
     SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_OUT     | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_MATCH   | SR_CONF_LIST,
+    /* PXView-local: read-only trigger sample position (uint64). Exposed so
+     * the app can place the trigger cursor after SR_DF_TRIGGER (which has
+     * no payload upstream). See config_get case SR_CONF_TRIGGER_POS. */
+    SR_CONF_TRIGGER_POS     | SR_CONF_GET,
 };
 
 static const struct PX_profile supported_PX[] = {

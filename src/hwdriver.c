@@ -294,6 +294,9 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Disk cache path", NULL},
 	{SR_CONF_STREAM_MEM_BUFF, SR_T_FLOAT, "stream_mem_buff",
 		"Stream memory buffer size (no cache)", NULL},
+	/* PXView-local extension: trigger sample position (uint64, GET only). */
+	{SR_CONF_TRIGGER_POS, SR_T_UINT64, "trigger_pos",
+		"Trigger position (sample offset)", NULL},
 	/* Fork 30000-range keys reassigned to 60020+ */
 	{SR_CONF_USB_SPEED, SR_T_STRING, "usb_speed",
 		"USB speed", NULL},

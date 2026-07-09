@@ -672,6 +672,11 @@ static int start_transfers(const struct sr_dev_inst *sdi)
 
 	timeout = get_timeout(devc);
 	devc->num_transfers = num_transfers;
+
+	/* RAW_IO is enabled by default by winusbx_configure_endpoints() —
+	 * fx2lafw's multi-transfer streaming pipeline (up to
+	 * NUM_SIMUL_TRANSFERS concurrent ReadPipes) relies on it directly. */
+
 	for (i = 0; i < num_transfers; i++) {
 		if (!(buf = g_try_malloc(size))) {
 			sr_err("USB transfer buffer malloc failed.");

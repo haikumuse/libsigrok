@@ -1,4 +1,7 @@
 #include "usb_ctrl.h"
+
+#define LOG_PREFIX "pxlogic"
+
 //libusb_device_handle *usbdevh = NULL;
 //volatile bool usb_busy = false;
 
@@ -38,10 +41,14 @@ unsigned int usb_wr_reg(libusb_device_handle *usbdevh,unsigned int reg_addr,unsi
      if(usbdevh ){
         rc=libusb_bulk_transfer(usbdevh, 0x01, (uint8_t*)buf, 16,&transferred, 1000);
         if(rc!=0){
+            sr_err("usb_wr_reg: write ep 0x01 failed: %s", libusb_error_name(rc));
+            libusb_clear_halt(usbdevh, 0x01);
             return 1;
         }
         rc=libusb_bulk_transfer(usbdevh, 0x81, (uint8_t*)buf, 16,&transferred, 1000);
         if(rc!=0){
+            sr_err("usb_wr_reg: read ep 0x81 failed: %s", libusb_error_name(rc));
+            libusb_clear_halt(usbdevh, 0x81);
             return 2;
         }
         if(buf[3]!=0xfefefefe) return 3;
@@ -65,11 +72,15 @@ unsigned int usb_rd_reg(libusb_device_handle *usbdevh,unsigned int reg_addr,unsi
          //发送寄存器读请求
          rc=libusb_bulk_transfer(usbdevh, 0x01, (uint8_t*)buf, 16,&transferred, 1000);
          if(rc!=0){
+             sr_err("usb_rd_reg: write ep 0x01 failed: %s", libusb_error_name(rc));
+             libusb_clear_halt(usbdevh, 0x01);
              return rc;
          }
          //读取寄存器值
          rc=libusb_bulk_transfer(usbdevh, 0x81, (uint8_t*)buf, 16,&transferred, 1000);
          if(rc!=0){
+             sr_err("usb_rd_reg: read ep 0x81 failed: %s", libusb_error_name(rc));
+             libusb_clear_halt(usbdevh, 0x81);
              return 2;
          }
          *reg_data = buf[3];

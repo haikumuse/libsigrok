@@ -284,7 +284,9 @@ static int setup_probes(struct sr_dev_inst *sdi, int num_probes)
         if (!(probe = sr_channel_new(sdi, j, channel_modes[devc->ch_mode].type,
                   TRUE, probe_names[j])))
             return SR_ERR;
-        sdi->channels = g_slist_append(sdi->channels, probe);
+        /* sr_channel_new() already appends to sdi->channels (libsigrok 0.6.0
+         * device.c:73). Only add to the channel group here — appending to
+         * sdi->channels again would duplicate every channel (32 -> 64). */
         cg->channels = g_slist_append(cg->channels, probe);
     }
     sdi->channel_groups = g_slist_append(sdi->channel_groups, cg);
@@ -687,6 +689,34 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
         return SR_ERR;
     }
 
+    /* DEBUG: 打印活动配置的所有接口端点描述符，用于诊断 0x81 失败问题 */
+    {
+        struct libusb_config_descriptor *cfg = NULL;
+        int r = libusb_get_active_config_descriptor(dev_handel, &cfg);
+        if (r == 0 && cfg) {
+            int i, j;
+            sr_err("DEBUG: config descriptor: bNumInterfaces=%d", cfg->bNumInterfaces);
+            for (i = 0; i < cfg->bNumInterfaces; i++) {
+                const struct libusb_interface *iface = &cfg->interface[i];
+                int a;
+                for (a = 0; a < iface->num_altsetting; a++) {
+                    const struct libusb_interface_descriptor *as = &iface->altsetting[a];
+                    sr_err("DEBUG: iface[%d] alt[%d]: bNumEndpoints=%d bInterfaceClass=%d",
+                        i, a, as->bNumEndpoints, as->bInterfaceClass);
+                    for (j = 0; j < as->bNumEndpoints; j++) {
+                        const struct libusb_endpoint_descriptor *ep = &as->endpoint[j];
+                        sr_err("DEBUG:   ep[%d]: addr=0x%02X bmAttributes=0x%02X(type=%d) wMaxPacketSize=%u",
+                            j, ep->bEndpointAddress, ep->bmAttributes,
+                            ep->bmAttributes & 0x03, ep->wMaxPacketSize);
+                    }
+                }
+            }
+            libusb_free_config_descriptor(cfg);
+        } else {
+            sr_err("DEBUG: libusb_get_active_config_descriptor failed: %s", libusb_error_name(r));
+        }
+    }
+
     libusb_set_auto_detach_kernel_driver(usb->devhdl, 1);
 
     if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_C)) < 0) {
@@ -718,13 +748,19 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
      * Data acquisition uses 4 concurrent transfers on endpoint 0x82, but
      * with aligned BUFSIZE buffers it performs adequately without RAW_IO.
      * On Linux/macOS libusb_set_raw_io is a no-op. */
-    libusb_set_raw_io(usb->devhdl, 0x01, 0);
-    libusb_set_raw_io(usb->devhdl, 0x81, 0);
-    libusb_set_raw_io(usb->devhdl, 0x82, 0);
-    libusb_set_raw_io(usb->devhdl, 0x03, 0);
-    libusb_set_raw_io(usb->devhdl, 0x83, 0);
-    libusb_set_raw_io(usb->devhdl, 0x04, 0);
-    libusb_set_raw_io(usb->devhdl, 0x84, 0);
+    {
+        unsigned char eps[] = {0x01, 0x81, 0x82, 0x03, 0x83, 0x04, 0x84};
+        unsigned int ei;
+        for (ei = 0; ei < ARRAY_SIZE(eps); ei++) {
+            int rc2 = libusb_set_raw_io(usb->devhdl, eps[ei], 0);
+            if (rc2 != 0) {
+                sr_err("libusb_set_raw_io(ep=%02X, 0) failed: %s",
+                    eps[ei], libusb_error_name(rc2));
+            } else {
+                sr_info("libusb_set_raw_io(ep=%02X, 0) OK", eps[ei]);
+            }
+        }
+    }
 
     if (usb->address == 0xff) {
         usb->address = libusb_get_device_address(dev_handel);
@@ -773,6 +809,20 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
                 sr_info(" open app bin file %s ", devc->profile->firmware);
                 ret = firmware_config(drvc->sr_ctx, usb->devhdl, devc->profile->firmware, 0);
                 sr_info("firmware  end");
+                if (ret != SR_OK) {
+                    /* Firmware load failed (e.g. SCI_LOGIC.bin not on the
+                     * sr_resourcepaths_get search path). MUST NOT execute
+                     * "rst usb" — resetting the device without a valid
+                     * firmware image drops it off the USB bus, causing
+                     * WM_DEVICECHANGE REMOVE/ARRIVAL and a dead handle.
+                     * Return the error so hw_dev_open surfaces it instead
+                     * of proceeding to acquisition_start with a broken
+                     * device. */
+                    sr_err("app firmware load failed (%d); aborting rst usb",
+                        ret);
+                    sdi->status = SR_ST_INITIALIZING;
+                    return SR_ERR;
+                }
                 sr_info("rst usb ");
                 reg_addr = 8192 + 12 * 4;
                 reg_data = 0;
@@ -808,15 +858,21 @@ static int hw_dev_open(struct sr_dev_inst *sdi)
     struct PX_context *const devc = sdi->priv;
     (void)devc;
     gboolean fpga_done = 0;
+    int ret;
 
     if (sdi->status != SR_ST_ACTIVE) {
         fpga_done = 0;
     }
 
-    hw_usb_open(di, sdi, &fpga_done);
-    sr_info("hw_dev_open");
+    ret = hw_usb_open(di, sdi, &fpga_done);
+    sr_info("hw_dev_open (ret=%d)", ret);
 
-    return SR_OK;
+    /* Propagate hw_usb_open's status. Previously this function always
+     * returned SR_OK even when firmware loading failed, which left
+     * acquisition_start to talk to a half-initialized device. SR_ERR_DEV_CLOSED
+     * is the normal "firmware was just uploaded, device needs re-enumeration"
+     * path — surface it so the caller can reopen. */
+    return ret;
 }
 
 SR_PRIV int hw_usb_close(struct sr_dev_inst *sdi)
@@ -970,6 +1026,15 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         *data = g_variant_new_double(devc->pwm1_duty);
         break;
 
+    case SR_CONF_TRIGGER_POS:
+        /* PXView-local extension: expose the real trigger sample position
+         * computed by the hardware (devc->trigger_pos_set, set in
+         * receive_data when trig_out_validset fires). Upstream
+         * SR_DF_TRIGGER has no payload, so the app reads the trigger
+         * cursor position via this key instead. Returns uint64 samples. */
+        *data = g_variant_new_uint64(devc->trigger_pos_set);
+        break;
+
     default:
         return SR_ERR_NA;
     }
@@ -992,7 +1057,9 @@ SR_PRIV int pxlogic_adjust_probes(struct sr_dev_inst *sdi, int num_probes)
         if (!(probe = sr_channel_new(sdi, j, channel_modes[devc->ch_mode].type,
                   TRUE, probe_names[j])))
             return SR_ERR;
-        sdi->channels = g_slist_append(sdi->channels, probe);
+        /* sr_channel_new() already appends to sdi->channels (libsigrok 0.6.0
+         * device.c:73). Do NOT append again here — that would duplicate every
+         * newly added channel (same bug as setup_probes). */
         j++;
     }
 

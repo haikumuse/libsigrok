@@ -494,8 +494,14 @@ enum sr_hotplug_event {
 
 /** Hotplug callback signature.
  * @param event SR_HOTPLUG_ATTACH or SR_HOTPLUG_DETACH.
- * @param user_data User pointer passed to sr_listen_hotplug. */
-typedef void (*sr_hotplug_callback)(int event, void *user_data);
+ * @param user_data User pointer passed to sr_listen_hotplug.
+ * @param device_handle Opaque device handle. For ATTACH events, points to
+ *                      the libusb_device* that arrived (valid for the
+ *                      duration of the callback on the libusb thread).
+ *                      NULL for DETACH events (libusb has already freed
+ *                      the device). */
+typedef void (*sr_hotplug_callback)(int event, void *user_data,
+		void *device_handle);
 
 /**
  * @struct sr_session
@@ -1336,13 +1342,13 @@ enum sr_configkey {
 	/*--- PXLogic driver extension keys ---------------------------------*/
 	/*
 	 * Keys required by the PXLogic (ch569w) driver, ported from PXView
-	 * fork libsigrok. Fork 60001-60013 values are kept as-is (no conflict
+	 * fork libsigrok. Fork 60001-60014 values are kept as-is (no conflict
 	 * with upstream 10000-50000 ranges). Fork 30000-range keys are
 	 * reassigned to 60020+ to avoid conflict with upstream's 30000-range
 	 * keys (SR_CONF_PATTERN_MODE=30002, SR_CONF_RLE=30003, etc).
 	 */
 
-	/* Fork 60001-60013: keep original values (no conflict) */
+	/* Fork 60001-60014: keep original values (no conflict) */
 	SR_CONF_LOOP_MODE = 60001,
 	SR_CONF_EX_TRIGGER_MATCH,
 	SR_CONF_TRIGGER_OUT,
@@ -1356,6 +1362,11 @@ enum sr_configkey {
 	SR_CONF_DISK_CACHE_ENABLE,
 	SR_CONF_DISK_CACHE_PATH,
 	SR_CONF_STREAM_MEM_BUFF,
+	/* SR_CONF_TRIGGER_POS = 60014 — PXView-local extension. Exposes the
+	 * real trigger sample position computed by the PXLogic driver
+	 * (devc->trigger_pos_set). Upstream SR_DF_TRIGGER has no payload, so
+	 * the trigger cursor position is read via config_get instead. */
+	SR_CONF_TRIGGER_POS,
 
 	/* Fork 30000-range keys reassigned to 60020+ (avoid upstream conflict) */
 	SR_CONF_USB_SPEED = 60020,

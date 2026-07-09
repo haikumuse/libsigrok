@@ -46,9 +46,9 @@ static int LIBUSB_CALL sr_hotplug_libusb_cb(libusb_context *ctx,
 {
 	struct sr_context *sr_ctx = (struct sr_context *)user_data;
 	int ev;
+	void *device_handle = NULL;
 
 	(void)ctx;
-	(void)dev;
 
 	if (!sr_ctx || !sr_ctx->hotplug_state)
 		return 0;
@@ -56,15 +56,22 @@ static int LIBUSB_CALL sr_hotplug_libusb_cb(libusb_context *ctx,
 	if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) {
 		sr_warn("hotplug: libusb callback ARRIVED fired");
 		ev = SR_HOTPLUG_ATTACH;
+		/* ATTACH: libusb_device* is valid for the lifetime of this
+		 * callback; pass it through so the app layer can identify which
+		 * device arrived. */
+		device_handle = (void *)dev;
 	} else if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT) {
 		sr_warn("hotplug: libusb callback LEFT fired");
 		ev = SR_HOTPLUG_DETACH;
+		/* DETACH: libusb has already freed the device; pass NULL. */
+		device_handle = NULL;
 	} else {
 		return 0;
 	}
 
 	if (sr_ctx->hotplug_state->user_cb)
-		sr_ctx->hotplug_state->user_cb(ev, sr_ctx->hotplug_state->user_data);
+		sr_ctx->hotplug_state->user_cb(ev,
+				sr_ctx->hotplug_state->user_data, device_handle);
 
 	return 0;
 }
