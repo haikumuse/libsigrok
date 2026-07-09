@@ -369,54 +369,35 @@ SR_PRIV gboolean logic_check_conf_profile(libusb_device *dev, uint32_t *logic_mo
 
     hdl = NULL;
     bSucess = FALSE;
-    ret = 0;
+    *logic_mode = 0;  /* scan 阶段不读取，dev_open 阶段修正 */
 
-    while (!bSucess) {
-        if ((ret = libusb_get_device_descriptor(dev, &des)) < 0) {
-            sr_err("%s:%d, Failed to get device descriptor: %s",
-                __func__, __LINE__, libusb_error_name(ret));
-            break;
-        }
-
-        if ((ret = libusb_open(dev, &hdl)) < 0) {
-            sr_err("%s:%d, Failed to open device: %s",
-                __func__, __LINE__, libusb_error_name(ret));
-            return FALSE;
-        }
-
-        ret = libusb_claim_interface(hdl, USB_INTERFACE_C);
-        ret = libusb_claim_interface(hdl, USB_INTERFACE_D);
-
-        if ((ret = libusb_get_string_descriptor_ascii(hdl,
-                 des.iManufacturer, strdesc, sizeof(strdesc)))
-            < 0) {
-            sr_err("%s:%d, Failed to get device descriptor ascii: %s",
-                __func__, __LINE__, libusb_error_name(ret));
-            break;
-        }
-
-        if (strncmp((const char *)strdesc, "PX", 2))
-            break;
-
-        uint32_t reg_addr;
-        uint32_t reg_data;
-        reg_addr = 8192 + 22 * 4;
-        ret = usb_rd_reg(hdl, reg_addr, &reg_data);
-
-        if (ret == 0) {
-            bSucess = TRUE;
-            *logic_mode = reg_data;
-        } else {
-            bSucess = FALSE;
-            break;
-        }
+    if ((ret = libusb_get_device_descriptor(dev, &des)) < 0) {
+        sr_err("%s:%d, Failed to get device descriptor: %s",
+            __func__, __LINE__, libusb_error_name(ret));
+        return FALSE;
     }
 
-    if (hdl) {
-        ret = libusb_release_interface(hdl, USB_INTERFACE_C);
-        ret = libusb_release_interface(hdl, USB_INTERFACE_D);
+    if ((ret = libusb_open(dev, &hdl)) < 0) {
+        sr_err("%s:%d, Failed to open device: %s",
+            __func__, __LINE__, libusb_error_name(ret));
+        /* 设备可能被占用，像 DSL 驱动那样仍加入列表，dev_open 时再处理 */
+        return TRUE;
+    }
+
+    /* scan 阶段只用 string descriptor 识别 PX 设备，不 claim interface
+     * 也不读寄存器（usb_rd_reg 内部调用 libusb_bulk_transfer，若设备
+     * 未正确安装 WinUSB 驱动会 SIGSEGV）。logic_mode 推迟到 dev_open
+     * 阶段（claim_interface 成功后）读取并修正 profile。 */
+    if ((ret = libusb_get_string_descriptor_ascii(hdl,
+             des.iManufacturer, strdesc, sizeof(strdesc))) < 0) {
+        sr_err("%s:%d, Failed to get device descriptor ascii: %s",
+            __func__, __LINE__, libusb_error_name(ret));
+    } else if (!strncmp((const char *)strdesc, "PX", 2)) {
+        bSucess = TRUE;
+    }
+
+    if (hdl)
         libusb_close(hdl);
-    }
 
     return bSucess;
 }
@@ -706,11 +687,73 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
         return SR_ERR;
     }
 
-    ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_C);
-    ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_D);
+    libusb_set_auto_detach_kernel_driver(usb->devhdl, 1);
+
+    if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_C)) < 0) {
+        sr_err("Failed to claim interface C: %s.", libusb_error_name(ret));
+        libusb_close(usb->devhdl);
+        usb->devhdl = NULL;
+        return SR_ERR;
+    }
+    if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_D)) < 0) {
+        sr_err("Failed to claim interface D: %s.", libusb_error_name(ret));
+        libusb_release_interface(usb->devhdl, USB_INTERFACE_C);
+        libusb_close(usb->devhdl);
+        usb->devhdl = NULL;
+        return SR_ERR;
+    }
+
+    /* Disable RAW_IO on all bulk endpoints used by PXLogic.
+     *
+     * winusbx_configure_endpoints() enables RAW_IO by default for all
+     * bulk endpoints (required by fx2lafw 24MHz streaming). PXLogic must
+     * turn it off because:
+     *   1. Register accesses use 16-byte bulk transfers on endpoints
+     *      0x01/0x81/0x04/0x84 — RAW_IO requires buffer lengths to be
+     *      multiples of the endpoint max packet size (USB3.0=1024,
+     *      USB2.0=512), so 16-byte transfers would fail.
+     *   2. On USB3.0, RAW_IO raises the risk of device entering recovery
+     *      mode when link errors occur (single-outstanding ReadPipe is
+     *      more resilient).
+     * Data acquisition uses 4 concurrent transfers on endpoint 0x82, but
+     * with aligned BUFSIZE buffers it performs adequately without RAW_IO.
+     * On Linux/macOS libusb_set_raw_io is a no-op. */
+    libusb_set_raw_io(usb->devhdl, 0x01, 0);
+    libusb_set_raw_io(usb->devhdl, 0x81, 0);
+    libusb_set_raw_io(usb->devhdl, 0x82, 0);
+    libusb_set_raw_io(usb->devhdl, 0x03, 0);
+    libusb_set_raw_io(usb->devhdl, 0x83, 0);
+    libusb_set_raw_io(usb->devhdl, 0x04, 0);
+    libusb_set_raw_io(usb->devhdl, 0x84, 0);
 
     if (usb->address == 0xff) {
         usb->address = libusb_get_device_address(dev_handel);
+    }
+
+    /* scan 阶段未读 logic_mode，此处 claim_interface 成功后读取并修正 profile。
+     * 同一 vid/pid/usb_speed 可能有多个变体（ch32/ch16 Pro/ch16 Plus），
+     * 通过 logic_mode 寄存器区分。 */
+    {
+        uint32_t lm_addr = 8192 + 22 * 4;
+        uint32_t lm_data = 0;
+        sr_err("DEBUG: about to call usb_rd_reg, devhdl=%p", (void*)usb->devhdl);
+        ret = usb_rd_reg(usb->devhdl, lm_addr, &lm_data);
+        sr_err("DEBUG: usb_rd_reg returned %d, lm_data=%u", ret, lm_data);
+        if (ret == 0 && lm_data != devc->profile->logic_mode) {
+            int k;
+            for (k = 0; supported_PX[k].vid; k++) {
+                if (supported_PX[k].vid == devc->profile->vid &&
+                    supported_PX[k].pid == devc->profile->pid &&
+                    supported_PX[k].usb_speed == devc->profile->usb_speed &&
+                    supported_PX[k].logic_mode == lm_data) {
+                    sr_info("Corrected profile: logic_mode %d -> %d (%s)",
+                        devc->profile->logic_mode, lm_data,
+                        supported_PX[k].model);
+                    devc->profile = &supported_PX[k];
+                    break;
+                }
+            }
+        }
     }
 
     {
@@ -1248,17 +1291,17 @@ static int config_list(uint32_t key, GVariant **data, const struct sr_dev_inst *
 
     switch (key) {
     case SR_CONF_SCAN_OPTIONS:
-        /* Task 7.4: route SCAN_OPTIONS through STD_CONFIG_LIST so scanopts[]
-         * is returned as a standard uint32 fixed array (libsigrok 0.6.0 ABI).
-         * SR_CONF_DEVICE_OPTIONS / DEVICE_SESSIONS intentionally NOT routed
-         * through STD_CONFIG_LIST — PXView's deviceoptions.cpp reads them as
-         * plain int32 without masking capability bits; STD_CONFIG_LIST would
-         * emit uint32 with cap bits and break the UI binding. */
-        return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
     case SR_CONF_DEVICE_OPTIONS:
-        *data = g_variant_new_from_data(G_VARIANT_TYPE("ai"),
-            hwoptions, ARRAY_SIZE(hwoptions) * sizeof(int32_t), TRUE, NULL, NULL);
-        break;
+        /* Task 7.4: route SCAN_OPTIONS / DEVICE_OPTIONS through STD_CONFIG_LIST
+         * so the arrays are returned as standard uint32 fixed arrays
+         * (libsigrok 0.6.0 ABI). hwdriver.c check_key() reads DEVICE_OPTIONS
+         * as a uint32 fixed array (sizeof(uint32_t)) to verify that a key is
+         * advertised with the matching capability bits (SR_CONF_GET/SET/LIST).
+         * Returning bare-key int32 ("ai") caused check_key to fail type
+         * matching, rejecting every sr_config_get/set call with
+         * "Option 'xxx' not available". deviceoptions.cpp masks cap bits
+         * before calling get_config_info(). */
+        return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
     case SR_CONF_DEVICE_SESSIONS:
         *data = g_variant_new_from_data(G_VARIANT_TYPE("ai"),
             sessions, ARRAY_SIZE(sessions) * sizeof(int32_t), TRUE, NULL, NULL);
