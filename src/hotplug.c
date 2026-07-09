@@ -63,8 +63,15 @@ static int LIBUSB_CALL sr_hotplug_libusb_cb(libusb_context *ctx,
 	} else if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT) {
 		sr_warn("hotplug: libusb callback LEFT fired");
 		ev = SR_HOTPLUG_DETACH;
-		/* DETACH: libusb has already freed the device; pass NULL. */
-		device_handle = NULL;
+		/* DETACH: pass the libusb_device* too. During the DEVICE_LEFT
+		 * callback the libusb_device* is still valid, and even after it
+		 * is freed by libusb (which happens AFTER this callback
+		 * returns), comparing two pointer VALUES is safe — no
+		 * dereference is performed. This lets the app layer check
+		 * whether the detached device is the one it currently holds open
+		 * by comparing the pointer value against
+		 * sr_dev_inst_libusb_device_get() of its active sdi. */
+		device_handle = (void *)dev;
 	} else {
 		return 0;
 	}

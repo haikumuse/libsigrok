@@ -112,6 +112,41 @@ SR_API GSList *sr_dev_inst_channel_groups_get(const struct sr_dev_inst *sdi);
  */
 SR_API int sr_dev_inst_usb_speed_get(const struct sr_dev_inst *sdi);
 
+/*
+ * Queries a USB device instance's underlying libusb_device pointer.
+ * @param sdi Device instance. Must not be NULL. Must be SR_INST_USB.
+ * @returns The libusb_device* (cast to void*) if the device handle is open,
+ *          otherwise NULL. The returned pointer is only valid while the
+ *          device handle remains open; it is intended for pointer-identity
+ *          comparison against hotplug DETACH callbacks (comparing two
+ *          pointer VALUES is safe even after the underlying libusb_device
+ *          has been freed, since no dereference is performed).
+ *
+ * This API lets the application layer identify which physical USB device
+ * corresponds to an open sdi without linking libusb directly. It is used by
+ * PXView's hotplug DETACH handling to check whether the detached device is
+ * the currently-capturing one.
+ */
+SR_API void *sr_dev_inst_libusb_device_get(const struct sr_dev_inst *sdi);
+
+/*
+ * Queries a USB device instance's vendor/product ID pair by reading the
+ * libusb device descriptor.
+ * @param sdi Device instance. Must not be NULL. Must be SR_INST_USB.
+ * @param vid Output: USB vendor ID. May be NULL (caller ignores vid).
+ * @param pid Output: USB product ID. May be NULL (caller ignores pid).
+ * @returns SR_OK on success, SR_ERR on failure (non-USB device, descriptor
+ *          cannot be read, etc.).
+ *
+ * If the device handle is open, the descriptor is read from the handle's
+ * underlying libusb_device; otherwise the device is located on the bus by
+ * bus/address and its descriptor is read. This mirrors
+ * sr_dev_inst_usb_speed_get's fast/slow path logic. Used by PXView's
+ * hotplug ATTACH rebind to match a re-enumerated device by VID/PID.
+ */
+SR_API int sr_dev_inst_usb_vidpid_get(const struct sr_dev_inst *sdi,
+		uint16_t *vid, uint16_t *pid);
+
 SR_API struct sr_dev_inst *sr_dev_inst_user_new(const char *vendor,
 		const char *model, const char *version);
 SR_API int sr_dev_inst_channel_add(struct sr_dev_inst *sdi, int index, int type, const char *name);

@@ -999,6 +999,123 @@ SR_API int sr_dev_inst_usb_speed_get(const struct sr_dev_inst *sdi)
 }
 
 /**
+ * Queries a USB device instance's underlying libusb_device pointer.
+ *
+ * Returns the libusb_device* (cast to void*) associated with the open device
+ * handle, or NULL if the handle is not open or the sdi is not a USB device.
+ * The pointer is intended for pointer-identity comparison against hotplug
+ * DETACH callbacks; comparing two pointer values is safe even after the
+ * underlying libusb_device has been freed (no dereference is performed).
+ *
+ * @param sdi Device instance to use. Must not be NULL.
+ *
+ * @return libusb_device* (as void*), or NULL.
+ */
+SR_API void *sr_dev_inst_libusb_device_get(const struct sr_dev_inst *sdi)
+{
+#ifdef HAVE_LIBUSB_1_0
+	struct sr_usb_dev_inst *usb;
+
+	if (!sdi || sdi->inst_type != SR_INST_USB || !sdi->conn)
+		return NULL;
+
+	usb = sdi->conn;
+
+	/* Only meaningful when the handle is open; for an un-opened sdi the
+	 * libusb_device* is not retained. */
+	if (usb->devhdl)
+		return (void *)libusb_get_device(usb->devhdl);
+#endif
+	return NULL;
+}
+
+/**
+ * Queries a USB device instance's vendor/product ID pair.
+ *
+ * Reads the libusb device descriptor to obtain idVendor/idProduct. If the
+ * device handle is open, the descriptor is read from the handle's underlying
+ * libusb_device; otherwise the device is located on the bus by bus/address
+ * and its descriptor is read. This mirrors sr_dev_inst_usb_speed_get's
+ * fast/slow path logic so it works for both opened and freshly-scanned sdis.
+ *
+ * @param sdi Device instance to use. Must not be NULL.
+ * @param vid Output: USB vendor ID. May be NULL.
+ * @param pid Output: USB product ID. May be NULL.
+ *
+ * @return SR_OK on success, SR_ERR on failure.
+ */
+SR_API int sr_dev_inst_usb_vidpid_get(const struct sr_dev_inst *sdi,
+		uint16_t *vid, uint16_t *pid)
+{
+#ifdef HAVE_LIBUSB_1_0
+	struct sr_usb_dev_inst *usb;
+	struct libusb_device *dev;
+	struct drv_context *drvc;
+	struct libusb_device **devlist;
+	struct libusb_device_descriptor desc;
+	int cnt, i, b, a, ret;
+
+	if (vid)
+		*vid = 0;
+	if (pid)
+		*pid = 0;
+
+	if (!sdi || sdi->inst_type != SR_INST_USB || !sdi->conn)
+		return SR_ERR;
+
+	usb = sdi->conn;
+
+	/* Fast path: handle open — read descriptor from the handle's device. */
+	if (usb->devhdl) {
+		dev = libusb_get_device(usb->devhdl);
+		if (dev) {
+			ret = libusb_get_device_descriptor(dev, &desc);
+			if (ret == LIBUSB_SUCCESS) {
+				if (vid)
+					*vid = desc.idVendor;
+				if (pid)
+					*pid = desc.idProduct;
+				return SR_OK;
+			}
+		}
+	}
+
+	/* Slow path: handle not open — locate by bus/address. */
+	if (!sdi->driver || !sdi->driver->context)
+		return SR_ERR;
+	drvc = sdi->driver->context;
+
+	cnt = libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
+	if (cnt < 0)
+		return SR_ERR;
+
+	ret = SR_ERR;
+	for (i = 0; i < cnt; i++) {
+		b = libusb_get_bus_number(devlist[i]);
+		a = libusb_get_device_address(devlist[i]);
+		if (b != usb->bus || a != usb->address)
+			continue;
+		if (libusb_get_device_descriptor(devlist[i], &desc) == LIBUSB_SUCCESS) {
+			if (vid)
+				*vid = desc.idVendor;
+			if (pid)
+				*pid = desc.idProduct;
+			ret = SR_OK;
+		}
+		break;
+	}
+	libusb_free_device_list(devlist, 1);
+	return ret;
+#else
+	if (vid)
+		*vid = 0;
+	if (pid)
+		*pid = 0;
+	return SR_ERR;
+#endif
+}
+
+/**
  * Queries a device instances' channel list.
  *
  * @param sdi Device instance to use. Must not be NULL.
