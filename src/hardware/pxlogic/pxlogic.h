@@ -430,6 +430,12 @@ static const uint32_t devopts[] = {
      * (SamplingBar) uses this to build the sample-depth dropdown upper
      * bound so the user cannot select a depth exceeding the hardware. */
     SR_CONF_HW_DEPTH        | SR_CONF_GET,
+    /* Device instance session list. config_list returns the sessions
+     * array; MainWindow uses it to save/restore per-session device
+     * config. Must be advertised here or hwdriver.c check_key() rejects
+     * sr_config_list(SR_CONF_DEVICE_SESSIONS) and the app falls back to
+     * "Device config list is empty" — making pxlogic.c:1386 dead code. */
+    SR_CONF_DEVICE_SESSIONS | SR_CONF_GET | SR_CONF_LIST,
 };
 
 static const struct PX_profile supported_PX[] = {
