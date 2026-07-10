@@ -1035,6 +1035,22 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         *data = g_variant_new_uint64(devc->trigger_pos_set);
         break;
 
+    case SR_CONF_HW_DEPTH:
+        /* Hardware storage depth (samples per channel). In buffer mode this
+         * is the FPGA DRAM capacity divided by enabled channels and unit
+         * bits; in stream mode the hardware has no depth limit (data flows
+         * continuously to host), so we return the buffer-mode depth as a
+         * reference — the application layer's stream branch does not use
+         * this value. Formula matches the old fork pxlogic.c. */
+        {
+            uint16_t ch_num_div = devc->ch_num ? devc->ch_num : 1;
+            uint16_t unit_bits = channel_modes[devc->ch_mode].unit_bits
+                                     ? channel_modes[devc->ch_mode].unit_bits : 1;
+            *data = g_variant_new_uint64(
+                devc->profile->dev_caps.hw_depth / unit_bits / ch_num_div);
+        }
+        break;
+
     default:
         return SR_ERR_NA;
     }

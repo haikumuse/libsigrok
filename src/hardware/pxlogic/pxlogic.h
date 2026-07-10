@@ -426,6 +426,10 @@ static const uint32_t devopts[] = {
      * the app can place the trigger cursor after SR_DF_TRIGGER (which has
      * no payload upstream). See config_get case SR_CONF_TRIGGER_POS. */
     SR_CONF_TRIGGER_POS     | SR_CONF_GET,
+    /* Hardware storage depth (samples per channel). Read-only. The app
+     * (SamplingBar) uses this to build the sample-depth dropdown upper
+     * bound so the user cannot select a depth exceeding the hardware. */
+    SR_CONF_HW_DEPTH        | SR_CONF_GET,
 };
 
 static const struct PX_profile supported_PX[] = {
