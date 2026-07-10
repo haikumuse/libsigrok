@@ -719,6 +719,29 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
 
     libusb_set_auto_detach_kernel_driver(usb->devhdl, 1);
 
+    /* Disable RAW_IO BEFORE claiming any interface.
+     *
+     * winusbx_configure_endpoints() (called inside libusb_claim_interface)
+     * consults raw_io_default to decide whether to enable RAW_IO on bulk IN
+     * endpoints. Default is 1 (enabled, for fx2lafw streaming). PXLogic must
+     * set it to 0 because:
+     *   1. Register accesses use 16-byte bulk transfers on endpoints
+     *      0x01/0x81/0x04/0x84 — RAW_IO requires buffer lengths to be
+     *      multiples of the endpoint max packet size (USB3.0=1024,
+     *      USB2.0=512), so 16-byte transfers would fail.
+     *   2. The WinUSB TRUE→FALSE transition (via libusb_set_raw_io after
+     *      claim) is unreliable: SetPipePolicy returns success but subsequent
+     *      ReadPipe completions return ERROR_INVALID_FUNCTION on some devices.
+     *      Setting raw_io_default=0 before claim avoids the transition entirely
+     *      — endpoints start with RAW_IO=FALSE (WinUSB native default).
+     *   3. On USB3.0, RAW_IO raises the risk of device entering recovery
+     *      mode when link errors occur (single-outstanding ReadPipe is
+     *      more resilient).
+     * Data acquisition uses 4 concurrent transfers on endpoint 0x82, but
+     * with aligned BUFSIZE buffers it performs adequately without RAW_IO.
+     * On Linux/macOS libusb_set_raw_io_default is a no-op. */
+    libusb_set_raw_io_default(usb->devhdl, 0);
+
     if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_C)) < 0) {
         sr_err("Failed to claim interface C: %s.", libusb_error_name(ret));
         libusb_close(usb->devhdl);
@@ -733,34 +756,9 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
         return SR_ERR;
     }
 
-    /* Disable RAW_IO on all bulk endpoints used by PXLogic.
-     *
-     * winusbx_configure_endpoints() enables RAW_IO by default for all
-     * bulk endpoints (required by fx2lafw 24MHz streaming). PXLogic must
-     * turn it off because:
-     *   1. Register accesses use 16-byte bulk transfers on endpoints
-     *      0x01/0x81/0x04/0x84 — RAW_IO requires buffer lengths to be
-     *      multiples of the endpoint max packet size (USB3.0=1024,
-     *      USB2.0=512), so 16-byte transfers would fail.
-     *   2. On USB3.0, RAW_IO raises the risk of device entering recovery
-     *      mode when link errors occur (single-outstanding ReadPipe is
-     *      more resilient).
-     * Data acquisition uses 4 concurrent transfers on endpoint 0x82, but
-     * with aligned BUFSIZE buffers it performs adequately without RAW_IO.
-     * On Linux/macOS libusb_set_raw_io is a no-op. */
-    {
-        unsigned char eps[] = {0x01, 0x81, 0x82, 0x03, 0x83, 0x04, 0x84};
-        unsigned int ei;
-        for (ei = 0; ei < ARRAY_SIZE(eps); ei++) {
-            int rc2 = libusb_set_raw_io(usb->devhdl, eps[ei], 0);
-            if (rc2 != 0) {
-                sr_err("libusb_set_raw_io(ep=%02X, 0) failed: %s",
-                    eps[ei], libusb_error_name(rc2));
-            } else {
-                sr_info("libusb_set_raw_io(ep=%02X, 0) OK", eps[ei]);
-            }
-        }
-    }
+    /* RAW_IO already disabled via libusb_set_raw_io_default() before claim.
+     * No per-endpoint libusb_set_raw_io() calls needed — endpoints started
+     * with RAW_IO=FALSE (WinUSB native default). */
 
     if (usb->address == 0xff) {
         usb->address = libusb_get_device_address(dev_handel);
