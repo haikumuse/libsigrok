@@ -56,10 +56,14 @@
 
 /* --- Fork-compatible type definitions (not in upstream libsigrok 0.6.0) --- */
 
-/* Fork time/frequency macros (upstream only has SR_HZ/SR_KHZ/SR_MHZ/SR_GHZ) */
-#define SR_NS(n) (n)
-#define SR_US(n) ((n) * (uint64_t)(1000ULL))
+/* Fork time/frequency macros (upstream only has SR_HZ/SR_KHZ/SR_MHZ/SR_GHZ).
+ * SR_NS/SR_US are now used from upstream libsigrok.h (semantically equivalent:
+ * both cast to uint64_t). SR_Mn/SR_Gn are fork-only and have no upstream
+ * equivalent, so they are #undef'd before redefinition to avoid redefinition
+ * warnings. */
+#undef SR_Mn
 #define SR_Mn(n) ((n) * (uint64_t)(1000000ULL))
+#undef SR_Gn
 #define SR_Gn(n) ((n) * (uint64_t)(1000000000ULL))
 
 /* Operation modes (fork enum OPERATION_MODE) */
@@ -208,7 +212,6 @@ struct PX_context {
   uint16_t samplerates_min_index;
   uint16_t samplerates_max_index;
   gboolean instant;
-  uint8_t max_height;
   uint64_t samples_not_sent;
 
   uint8_t *buf;
@@ -350,37 +353,20 @@ static const uint64_t samplerates[] = {
 #define USB_INTERFACE_C 0
 #define USB_INTERFACE_D 1
 
-static const char *maxHeights[] = {
-    "1X", "2X", "3X", "4X", "5X",
-};
-
 static const char *probe_names[] = {
     "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10",
     "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21",
     "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", NULL,
 };
 
-static const char *probeMapUnits[] = {
-    "V", "A", "°C", "°F", "g", "m", "m/s",
-};
+// probeMapUnits removed: upstream sr_channel has no map_unit field.
+// (fork sr_channel.map_unit was DSO/analog-only; PXLogic is LOGIC-only.)
 
-// C-class keys (DISK_CACHE_ENABLE/PATH, STREAM_BUFF, STREAM_MEM_BUFF) are
-// NOT declared here — they are app-layer concepts served by DeviceAgent's
-// app-layer config state (see deviceagent.cpp is_app_layer_key). Declaring
-// them in hwoptions would cause the UI to query the driver, but the driver
-// no longer implements config_get/set for these keys.
-static const int hwoptions[] = {
-    SR_CONF_OPERATION_MODE,
-    SR_CONF_VTH,
-    SR_CONF_EX_TRIGGER_MATCH,
-    SR_CONF_FILTER,
-    SR_CONF_CLOCK_EDGE,
-    SR_CONF_TRIGGER_OUT,
-    SR_CONF_PWM0_EN,
-    SR_CONF_PWM0_FREQ,
-    SR_CONF_PWM0_DUTY,
-};
-
+/* C-class keys (DISK_CACHE_ENABLE/PATH, STREAM_BUFF, STREAM_MEM_BUFF) are
+ * NOT declared in devopts[] — they are app-layer concepts served by
+ * DeviceAgent's app-layer config state (see deviceagent.cpp
+ * is_app_layer_key). The driver no longer implements config_get/set for
+ * these keys. */
 static const int32_t sessions[] = {
     SR_CONF_SAMPLERATE,
     SR_CONF_LIMIT_SAMPLES,
@@ -391,15 +377,19 @@ static const int32_t sessions[] = {
     SR_CONF_FILTER,
     SR_CONF_CLOCK_EDGE,
     SR_CONF_TRIGGER_OUT,
+    SR_CONF_PWM0_EN,
+    SR_CONF_PWM0_FREQ,
+    SR_CONF_PWM0_DUTY,
+    SR_CONF_PWM1_EN,
+    SR_CONF_PWM1_FREQ,
+    SR_CONF_PWM1_DUTY,
 };
 
-/* STD_CONFIG_LIST arrays (Task 7.1-7.3). Carrying SR_CONF_GET|SET|LIST
- * capability bits per upstream libsigrok 0.6.0 convention.
- * NOTE: SR_CONF_DEVICE_OPTIONS still returns hwoptions[] (legacy bare-key
- * array) for application-layer compatibility — PXView's deviceoptions.cpp
- * reads options as plain int32_t without masking capability bits, so
- * switching DEVICE_OPTIONS to STD_CONFIG_LIST would break UI binding.
- * SR_CONF_SCAN_OPTIONS is the only key routed through STD_CONFIG_LIST. */
+/* STD_CONFIG_LIST arrays. Carrying SR_CONF_GET|SET|LIST capability bits
+ * per upstream libsigrok 0.6.0 convention. SR_CONF_SCAN_OPTIONS and
+ * SR_CONF_DEVICE_OPTIONS are both routed through STD_CONFIG_LIST in
+ * config_list(); deviceoptions.cpp masks cap bits (& 0x1fffffff) before
+ * dispatching to the switch(key) UI binding. */
 static const uint32_t scanopts[] = {
     SR_CONF_CONN,
 };
@@ -422,6 +412,15 @@ static const uint32_t devopts[] = {
     SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_OUT     | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_MATCH   | SR_CONF_LIST,
+    /* PWM0/PWM1 输出配置：驱动 config_get/set 已实现，UI 通过
+     * deviceoptions.cpp 的 switch case 渲染为控件。PWM1 在旧版中被
+     * 注释掉，新版按用户需求一并暴露。 */
+    SR_CONF_PWM0_EN         | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_PWM0_FREQ       | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_PWM0_DUTY       | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_PWM1_EN         | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_PWM1_FREQ       | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_PWM1_DUTY       | SR_CONF_GET | SR_CONF_SET,
     /* PXView-local: read-only trigger sample position (uint64). Exposed so
      * the app can place the trigger cursor after SR_DF_TRIGGER (which has
      * no payload upstream). See config_get case SR_CONF_TRIGGER_POS. */
@@ -434,8 +433,9 @@ static const uint32_t devopts[] = {
      * array; MainWindow uses it to save/restore per-session device
      * config. Must be advertised here or hwdriver.c check_key() rejects
      * sr_config_list(SR_CONF_DEVICE_SESSIONS) and the app falls back to
-     * "Device config list is empty" — making pxlogic.c:1386 dead code. */
-    SR_CONF_DEVICE_SESSIONS | SR_CONF_GET | SR_CONF_LIST,
+     * "Device config list is empty" — making pxlogic.c:1386 dead code.
+     * Only LIST is advertised: config_get has no case for this key. */
+    SR_CONF_DEVICE_SESSIONS | SR_CONF_LIST,
 };
 
 static const struct PX_profile supported_PX[] = {

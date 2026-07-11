@@ -187,35 +187,11 @@ static int hw_dev_acquisition_stop(struct sr_dev_inst *sdi);
 static void finish_acquisition(struct sr_dev_inst *sdi);
 static void receive_transfer(struct libusb_transfer *transfer);
 
-/* Deinterleave LA_CROSS_DATA (channel-block) to sample-interleaved format.
- * LA_CROSS_DATA: [8 bytes per channel, 64 samples per 8-byte block]
- *   Layout: [ch0: 64 samples in 8 bytes][ch1: 64 samples in 8 bytes]...
- * Sample-interleaved: [unitsize bytes per sample, all channels]
- *   unitsize = ch_num / 8
- */
-static void deinterleave_cross_to_interleaved(const uint8_t *cross_buf,
-        uint8_t *interleaved_buf, uint64_t byte_length, int ch_num)
-{
-    int unitsize = ch_num / 8;
-    uint64_t total_samples = byte_length * 8 / ch_num;
-    uint64_t s;
-
-    for (s = 0; s < total_samples; s++) {
-        uint64_t block = s / 64;
-        uint64_t bit_in_block = s % 64;
-        const uint8_t *block_start = cross_buf + block * (uint64_t)ch_num * 8;
-        uint8_t *out = interleaved_buf + s * unitsize;
-        int ch;
-
-        memset(out, 0, unitsize);
-        for (ch = 0; ch < ch_num; ch++) {
-            const uint8_t *ch_block = block_start + ch * 8;
-            uint8_t bit = (ch_block[bit_in_block / 8] >> (bit_in_block % 8)) & 1;
-            if (bit)
-                out[ch / 8] |= (1 << (ch % 8));
-        }
-    }
-}
+/* deinterleave_cross_to_interleaved removed: the driver now forwards raw
+ * LA_CROSS_DATA directly via sr_session_send (see receive_transfer), and
+ * LogicSnapshot::append_cross_payload handles the conversion on the PXView
+ * side. This avoids the ~100ms/4MB deinterleave bottleneck on the USB
+ * receive path (v1.49 architecture). */
 
 static int hw_init(struct sr_dev_driver *driver, struct sr_context *sr_ctx)
 {
@@ -320,7 +296,6 @@ static struct PX_context *pxlogic_dev_new(const struct PX_profile *prof)
     devc->limit_samples_show = devc->limit_samples;
     devc->limit_msec = 0;
     devc->timebase = devc->profile->dev_caps.default_timebase;
-    devc->max_height = 0;
     devc->op_mode = OP_BUFFER;
     devc->stream = (devc->op_mode != OP_BUFFER);
     devc->test_mode = 0;  /* PX_TEST_NONE (fork SR_TEST_NONE removed) */
@@ -650,7 +625,7 @@ SR_PRIV int firmware_config(struct sr_context *sr_ctx, struct libusb_device_hand
         return SR_ERR;
     }
 
-    sr_info("FPGA configure done: %d bytes.", filesize);
+    sr_info("FPGA configure done: %llu bytes.", (unsigned long long)filesize);
     return SR_OK;
 }
 
@@ -1111,7 +1086,6 @@ static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sd
 
     uint16_t i, nv;
     int ret, num_probes;
-    const char *stropt;
     struct PX_context *devc;
     struct sr_usb_dev_inst *usb;
 
@@ -1655,18 +1629,18 @@ SR_PRIV int start_transfers(const struct sr_dev_inst *sdi)
         usb_samples_1s = 480 * 1000 * 1000; // 480M USB2.0
     }
 
-    sr_info(" usb_samples_1s =  %d", usb_samples_1s);
+    sr_info(" usb_samples_1s =  %llu", (unsigned long long)usb_samples_1s);
 
     devc->ch_num = ch_num;
     sr_info(" ch_num =  %d", ch_num);
     sr_info(" devc-> ch_num =  %d", devc->ch_num);
 
-    sr_info(" devc->limit_samples =  %d", devc->limit_samples);
+    sr_info(" devc->limit_samples =  %llu", (unsigned long long)devc->limit_samples);
 
     samples_ch_1s = devc->cur_samplerate / 100 / 8;
-    sr_info(" samples_ch_1s =  %d", samples_ch_1s);
+    sr_info(" samples_ch_1s =  %llu", (unsigned long long)samples_ch_1s);
     samples_ch_1s_align_4k = align_4k(samples_ch_1s);
-    sr_info(" samples_ch_1s_align_4k =  %d", samples_ch_1s_align_4k);
+    sr_info(" samples_ch_1s_align_4k =  %llu", (unsigned long long)samples_ch_1s_align_4k);
 
     if (devc->usb_speed == LIBUSB_SPEED_SUPER) {
         usb_buff_max = 4 * 1024 * 1024; // 4M
@@ -1675,7 +1649,7 @@ SR_PRIV int start_transfers(const struct sr_dev_inst *sdi)
     }
 
     usb_buff_max = align_4k(usb_buff_max);
-    sr_info(" usb_buff_max =  %d", usb_buff_max);
+    sr_info(" usb_buff_max =  %llu", (unsigned long long)usb_buff_max);
 
     if (samples_ch_1s_align_4k * ch_num > usb_buff_max) {
         devc->block_size = (usb_buff_max / ch_num / 4096) * 4096 * ch_num;
@@ -1747,9 +1721,9 @@ SR_PRIV int start_transfers(const struct sr_dev_inst *sdi)
 
     rc = usb_wr_reg(usb->devhdl, 8192 + (9 << 2), devc->limit_samples2Byte);
     rc = usb_wr_reg(usb->devhdl, 8192 + (10 << 2), devc->limit_samples2Byte >> 32);
-    sr_info(" devc->limit_samples2Byte =  %d", devc->limit_samples2Byte);
+    sr_info(" devc->limit_samples2Byte =  %llu", (unsigned long long)devc->limit_samples2Byte);
 
-    sr_info(" devc->cur_samplerate =  %d", devc->cur_samplerate);
+    sr_info(" devc->cur_samplerate =  %llu", (unsigned long long)devc->cur_samplerate);
 
     if (devc->cur_samplerate == 1000000000)
         gpio_mode = 0;
@@ -1926,7 +1900,7 @@ static void receive_transfer(struct libusb_transfer *transfer)
     if (transfer->actual_length != 0 && transfer->status == LIBUSB_TRANSFER_COMPLETED) {
         devc->rece_transfers++;
         if (devc->limit_samples) {
-            if (transfer->actual_length == devc->block_size) {
+            if ((uint32_t)transfer->actual_length == devc->block_size) {
                 samples_to_send = transfer->actual_length;
             } else {
                 samples_to_send = transfer->actual_length;
@@ -2073,7 +2047,6 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi)
     struct PX_context *devc = sdi->priv;
     struct sr_usb_dev_inst *usb;
     struct drv_context *drvc;
-    int rc;
     (void)usb;
     drvc = di->context;
     if (sdi->status != SR_ST_ACTIVE)
