@@ -368,10 +368,13 @@ static const char *probe_names[] = {
  * is_app_layer_key). The driver no longer implements config_get/set for
  * these keys. */
 static const int32_t sessions[] = {
-    SR_CONF_SAMPLERATE,
-    SR_CONF_LIMIT_SAMPLES,
+    /* Mode keys MUST come first: setting OPERATION_MODE calls
+     * adjust_samplerate() and changes ch_mode, which would overwrite
+     * sample rate / limit / channel mode set earlier. */
     SR_CONF_OPERATION_MODE,
     SR_CONF_CHANNEL_MODE,
+    SR_CONF_SAMPLERATE,
+    SR_CONF_LIMIT_SAMPLES,
     SR_CONF_VTH,
     SR_CONF_EX_TRIGGER_MATCH,
     SR_CONF_FILTER,

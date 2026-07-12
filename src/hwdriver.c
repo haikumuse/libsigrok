@@ -1073,7 +1073,8 @@ SR_API int sr_config_list(const struct sr_dev_driver *driver,
 	if (!driver->config_list)
 		return SR_ERR_ARG;
 
-	if (key != SR_CONF_SCAN_OPTIONS && key != SR_CONF_DEVICE_OPTIONS) {
+	if (key != SR_CONF_SCAN_OPTIONS && key != SR_CONF_DEVICE_OPTIONS
+			&& key != SR_CONF_DEVICE_SESSIONS) {
 		if (check_key(driver, sdi, cg, key, SR_CONF_LIST, NULL) != SR_OK)
 			return SR_ERR_ARG;
 	}
@@ -1083,9 +1084,11 @@ SR_API int sr_config_list(const struct sr_dev_driver *driver,
 		return SR_ERR;
 	}
 
-	if (key != SR_CONF_SCAN_OPTIONS && key != SR_CONF_DEVICE_OPTIONS && !sdi) {
-		sr_err("Config keys other than SR_CONF_SCAN_OPTIONS and "
-		       "SR_CONF_DEVICE_OPTIONS always need an sdi.");
+	if (key != SR_CONF_SCAN_OPTIONS && key != SR_CONF_DEVICE_OPTIONS
+			&& key != SR_CONF_DEVICE_SESSIONS && !sdi) {
+		sr_err("Config keys other than SR_CONF_SCAN_OPTIONS, "
+		       "SR_CONF_DEVICE_OPTIONS and SR_CONF_DEVICE_SESSIONS "
+		       "always need an sdi.");
 		return SR_ERR_ARG;
 	}
 
