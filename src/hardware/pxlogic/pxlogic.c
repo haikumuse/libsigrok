@@ -1418,7 +1418,15 @@ static void free_transfer(struct libusb_transfer *transfer)
 
     g_free(transfer->buffer);
     transfer->buffer = NULL;
-    libusb_free_transfer(transfer);
+
+    /* CRITICAL FIX: Search and NULL the transfer pointer in the transfers[]
+     * array BEFORE calling libusb_free_transfer(). The previous code freed
+     * the transfer struct first and then compared the freed pointer value
+     * against devc->transfers[i], which is technically use-after-free (UB).
+     * In practice the pointer comparison usually works, but if the heap
+     * allocator reuses or poisons the freed memory, the comparison could
+     * fail, causing submitted_transfers to never reach 0 and
+     * finish_acquisition to never be called — or worse, heap corruption. */
     sr_info("free_transfer: devc->num_transfers = %d", devc->num_transfers);
     for (i = 0; i < devc->num_transfers; i++) {
         if (devc->transfers[i] == transfer) {
@@ -1427,6 +1435,9 @@ static void free_transfer(struct libusb_transfer *transfer)
             break;
         }
     }
+
+    /* Now safe to free the transfer struct — no further access to it. */
+    libusb_free_transfer(transfer);
 
     if (devc->submitted_transfers == 0) {
         sr_info("submitted_transfers == 0");
@@ -2097,6 +2108,7 @@ static void finish_acquisition(struct sr_dev_inst *sdi)
 
     devc->num_transfers = 0;
     g_free(devc->transfers);
+    devc->transfers = NULL;
 
     sr_dbg("finish_acquisition");
 }
