@@ -184,6 +184,8 @@ SR_API struct sr_trigger *sr_session_trigger_get(struct sr_session *session);
 /* Session setup */
 SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 	struct sr_session **session);
+SR_API struct sr_dev_inst *sr_session_load_file_device(
+	struct sr_context *ctx, const char *filename);
 SR_API int sr_session_new(struct sr_context *ctx, struct sr_session **session);
 SR_API int sr_session_destroy(struct sr_session *session);
 SR_API int sr_session_dev_remove_all(struct sr_session *session);

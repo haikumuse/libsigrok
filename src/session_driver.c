@@ -50,6 +50,9 @@ struct session_vdev {
 	GArray *analog_channels;
 	int cur_chunk;
 	gboolean finished;
+	/* PXView v3 format: per-channel chunked data (L-<ch>/<block>) */
+	gboolean pxv_format;
+	int pxv_cur_block;
 };
 
 static const uint32_t devopts[] = {
@@ -60,6 +63,144 @@ static const uint32_t devopts[] = {
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SESSIONFILE | SR_CONF_SET,
 };
+
+/*
+ * Stream PXView v3 format data: per-channel chunked (L-<ch>/<block>).
+ * Each chunk contains a single channel's bitmap (1 bit per sample, LSB-first
+ * within each byte). This function reads all channels' chunks for a given
+ * block number, interleaves them into upstream unitsize-packed format, and
+ * sends SR_DF_LOGIC packets.
+ */
+static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
+{
+	struct session_vdev *vdev;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_logic logic;
+	struct zip_stat zs;
+	char chunkname[32];
+	struct zip_file *zf;
+	struct sr_channel *ch_struct;
+	GSList *ch_list;
+	int ch_count, ch_ordinal;
+	int unitsize;
+	uint8_t **channel_bufs;
+	int *channel_indices;
+	int block_size = 0;
+	int samples_in_block;
+	uint8_t *out_buf;
+	int out_size;
+	int got_data = FALSE;
+
+	vdev = sdi->priv;
+	unitsize = vdev->unitsize;
+
+	if (unitsize <= 0)
+		return FALSE;
+
+	/* Count enabled logic channels and collect their actual indices */
+	ch_count = 0;
+	for (ch_list = sdi->channels; ch_list; ch_list = ch_list->next) {
+		ch_struct = ch_list->data;
+		if (ch_struct->type == SR_CHANNEL_LOGIC && ch_struct->enabled)
+			ch_count++;
+	}
+	if (ch_count <= 0)
+		return FALSE;
+
+	/* Check if the first enabled channel has a chunk for current block */
+	ch_ordinal = 0;
+	for (ch_list = sdi->channels; ch_list; ch_list = ch_list->next) {
+		ch_struct = ch_list->data;
+		if (ch_struct->type == SR_CHANNEL_LOGIC && ch_struct->enabled) {
+			snprintf(chunkname, sizeof(chunkname), "L-%d/%d",
+					ch_struct->index, vdev->pxv_cur_block);
+			if (zip_stat(vdev->archive, chunkname, 0, &zs) < 0)
+				return FALSE;
+			block_size = zs.size;
+			break;
+		}
+	}
+
+	/* Allocate arrays for channel data and indices */
+	channel_bufs = g_malloc0(sizeof(uint8_t *) * ch_count);
+	channel_indices = g_malloc0(sizeof(int) * ch_count);
+
+	/* Read all enabled logic channels' data for this block */
+	ch_ordinal = 0;
+	for (ch_list = sdi->channels; ch_list; ch_list = ch_list->next) {
+		ch_struct = ch_list->data;
+		if (ch_struct->type != SR_CHANNEL_LOGIC || !ch_struct->enabled)
+			continue;
+		int ch_idx = ch_struct->index;
+		channel_indices[ch_ordinal] = ch_idx;
+		snprintf(chunkname, sizeof(chunkname), "L-%d/%d",
+				ch_idx, vdev->pxv_cur_block);
+		if (zip_stat(vdev->archive, chunkname, 0, &zs) >= 0) {
+			zf = zip_fopen(vdev->archive, chunkname, 0);
+			if (zf) {
+				channel_bufs[ch_ordinal] = g_malloc(zs.size);
+				if (zip_fread(zf, channel_bufs[ch_ordinal], zs.size)
+						== (int)zs.size) {
+					if (block_size == 0)
+						block_size = zs.size;
+				} else {
+					sr_warn("Short read on %s.", chunkname);
+				}
+				zip_fclose(zf);
+			}
+		}
+		ch_ordinal++;
+	}
+
+	if (block_size == 0) {
+		g_free(channel_bufs);
+		g_free(channel_indices);
+		vdev->pxv_cur_block++;
+		return TRUE;
+	}
+
+	/* Interleave per-channel bitmaps into upstream unitsize-packed format.
+	 * PXView stores 1 bit per sample per channel (LSB-first in each byte).
+	 * Upstream expects all channels packed: channel c's bit at byte
+	 * (s*unitsize + c/8), bit (c%8), where c is the channel index. */
+	samples_in_block = block_size * 8;
+	out_size = samples_in_block * unitsize;
+	out_buf = g_malloc0(out_size);
+
+	for (int s = 0; s < samples_in_block; s++) {
+		int src_byte = s / 8;
+		int src_bit = s % 8;
+		for (ch_ordinal = 0; ch_ordinal < ch_count; ch_ordinal++) {
+			if (!channel_bufs[ch_ordinal])
+				continue;
+			int ch_idx = channel_indices[ch_ordinal];
+			uint8_t bit_val =
+				(channel_bufs[ch_ordinal][src_byte] >> src_bit) & 1;
+			if (bit_val) {
+				int dst_byte = s * unitsize + ch_idx / 8;
+				out_buf[dst_byte] |= (1 << (ch_idx % 8));
+			}
+		}
+	}
+
+	got_data = TRUE;
+	packet.type = SR_DF_LOGIC;
+	packet.payload = &logic;
+	logic.length = out_size;
+	logic.unitsize = unitsize;
+	logic.data = out_buf;
+	vdev->bytes_read += out_size;
+	sr_session_send(sdi, &packet);
+
+	g_free(out_buf);
+	for (ch_ordinal = 0; ch_ordinal < ch_count; ch_ordinal++)
+		g_free(channel_bufs[ch_ordinal]);
+	g_free(channel_bufs);
+	g_free(channel_indices);
+
+	vdev->pxv_cur_block++;
+	return got_data;
+}
 
 static gboolean stream_session_data(struct sr_dev_inst *sdi)
 {
@@ -77,6 +218,10 @@ static gboolean stream_session_data(struct sr_dev_inst *sdi)
 
 	got_data = FALSE;
 	vdev = sdi->priv;
+
+	/* PXView v3 format: route to per-channel interleave reader */
+	if (vdev->pxv_format)
+		return stream_pxv_session_data(sdi);
 
 	if (!vdev->capfile) {
 		/* No capture file opened yet, or finished with the last
@@ -358,6 +503,29 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		sr_err("Failed to open session file '%s': "
 		       "zip error %d.", vdev->sessionfile, ret);
 		return SR_ERR;
+	}
+
+	/* Detect PXView v3 format: per-channel chunks L-<ch>/<block> */
+	{
+		struct zip_stat zs;
+		struct sr_channel *ch_tmp;
+		GSList *l;
+		vdev->pxv_format = FALSE;
+		vdev->pxv_cur_block = 0;
+		for (l = sdi->channels; l; l = l->next) {
+			ch_tmp = l->data;
+			if (ch_tmp->type == SR_CHANNEL_LOGIC && ch_tmp->enabled) {
+				char tmp_name[32];
+				snprintf(tmp_name, sizeof(tmp_name),
+					"L-%d/0", ch_tmp->index);
+				if (zip_stat(vdev->archive, tmp_name, 0, &zs) >= 0) {
+					vdev->pxv_format = TRUE;
+					sr_info("Detected PXView v3 per-channel "
+						"chunked format.");
+				}
+				break;
+			}
+		}
 	}
 
 	std_session_send_df_header(sdi);

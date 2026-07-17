@@ -120,6 +120,8 @@ SR_PRIV int sr_sessionfile_check(const char *filename)
 	uint64_t version;
 	int ret;
 	char s[11];
+	GKeyFile *kf;
+	GError *error;
 
 	if (!filename)
 		return SR_ERR_ARG;
@@ -134,40 +136,58 @@ SR_PRIV int sr_sessionfile_check(const char *filename)
 		 * a sigrok session file or not. */
 		return SR_ERR;
 
-	/* check "version" */
-	if (!(zf = zip_fopen(archive, "version", 0))) {
-		sr_dbg("Not a sigrok session file: no version found.");
-		zip_discard(archive);
-		return SR_ERR;
-	}
-	ret = zip_fread(zf, s, sizeof(s) - 1);
-	if (ret < 0) {
-		sr_err("Failed to read version file: %s",
-			zip_file_strerror(zf));
+	/* check "version" (upstream sigrok format) */
+	if ((zf = zip_fopen(archive, "version", 0))) {
+		ret = zip_fread(zf, s, sizeof(s) - 1);
 		zip_fclose(zf);
+		if (ret < 0) {
+			zip_discard(archive);
+			return SR_ERR;
+		}
+		s[ret] = '\0';
+		version = g_ascii_strtoull(s, NULL, 10);
+		if (version == 0 || version > 2) {
+			sr_dbg("Cannot handle sigrok session file version %" PRIu64 ".",
+				version);
+			zip_discard(archive);
+			return SR_ERR;
+		}
+		sr_spew("Detected sigrok session file version %" PRIu64 ".", version);
+		/* read "metadata" */
+		if (zip_stat(archive, "metadata", 0, &zs) < 0) {
+			sr_dbg("Not a valid sigrok session file.");
+			zip_discard(archive);
+			return SR_ERR;
+		}
 		zip_discard(archive);
-		return SR_ERR;
+		return SR_OK;
 	}
-	zip_fclose(zf);
-	s[ret] = '\0';
-	version = g_ascii_strtoull(s, NULL, 10);
-	if (version == 0 || version > 2) {
-		sr_dbg("Cannot handle sigrok session file version %" PRIu64 ".",
-			version);
-		zip_discard(archive);
-		return SR_ERR;
-	}
-	sr_spew("Detected sigrok session file version %" PRIu64 ".", version);
 
-	/* read "metadata" */
-	if (zip_stat(archive, "metadata", 0, &zs) < 0) {
-		sr_dbg("Not a valid sigrok session file.");
-		zip_discard(archive);
-		return SR_ERR;
+	/* Try PXView v3 format: "header" file with [version] section */
+	if (zip_stat(archive, "header", 0, &zs) >= 0) {
+		kf = sr_sessionfile_read_metadata(archive, &zs);
+		if (kf) {
+			error = NULL;
+			gchar *ver_str = g_key_file_get_string(kf, "version", "version", &error);
+			if (ver_str && !error) {
+				version = g_ascii_strtoull(ver_str, NULL, 10);
+				g_free(ver_str);
+				if (version >= 1 && version <= 3) {
+					sr_spew("Detected PXView session file version %" PRIu64 ".", version);
+					g_key_file_free(kf);
+					zip_discard(archive);
+					return SR_OK;
+				}
+			}
+			if (error)
+				g_error_free(error);
+			g_key_file_free(kf);
+		}
 	}
+
+	sr_dbg("Not a sigrok/PXView session file: no version found.");
 	zip_discard(archive);
-
-	return SR_OK;
+	return SR_ERR;
 }
 
 /** @private */
@@ -217,7 +237,7 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 	uint64_t tmp_u64;
 	int total_channels, total_analog, k;
 	GSList *l;
-	int unitsize;
+	int unitsize = 0;
 	char **sections, **keys, *val;
 	char channelname[SR_MAX_CHANNELNAME_LEN + 1];
 	gboolean file_has_logic;
@@ -228,9 +248,13 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 	if (!(archive = zip_open(filename, 0, NULL)))
 		return SR_ERR;
 
+	/* Try upstream "metadata" first, then PXView "header" */
 	if (zip_stat(archive, "metadata", 0, &zs) < 0) {
-		zip_discard(archive);
-		return SR_ERR;
+		if (zip_stat(archive, "header", 0, &zs) < 0) {
+			sr_err("No metadata or header in session file.");
+			zip_discard(archive);
+			return SR_ERR;
+		}
 	}
 	kf = sr_sessionfile_read_metadata(archive, &zs);
 	zip_discard(archive);
@@ -249,11 +273,11 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 	file_has_logic = FALSE;
 	sections = g_key_file_get_groups(kf, NULL);
 	for (i = 0; sections[i] && ret == SR_OK; i++) {
-		if (!strcmp(sections[i], "global"))
+		if (!strcmp(sections[i], "global") || !strcmp(sections[i], "version"))
 			/* nothing really interesting in here yet */
 			continue;
-		if (!strncmp(sections[i], "device ", 7)) {
-			/* device section */
+		if (!strncmp(sections[i], "device ", 7) || !strcmp(sections[i], "header")) {
+			/* device section (upstream "device N" or PXView "header") */
 			sdi = NULL;
 			keys = g_key_file_get_keys(kf, sections[i], NULL, NULL);
 
@@ -276,6 +300,10 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 				file_has_logic = TRUE;
 			}
 			g_clear_error(&error);
+
+			/* Detect PXView 0-based probe naming (probe0 vs upstream probe1) */
+			gboolean probe_zero_based = g_key_file_has_key(kf,
+					sections[i], "probe0", NULL);
 
 			for (j = 0; keys[j]; j++) {
 				if (!strcmp(keys[j], "samplerate")) {
@@ -300,15 +328,21 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 					sr_config_set(sdi, NULL, SR_CONF_CAPTURE_UNITSIZE,
 							g_variant_new_uint64(unitsize));
 				} else if (!strcmp(keys[j], "total probes")) {
-					total_channels = g_key_file_get_integer(kf,
-							sections[i], keys[j], &error);
-					if (!sdi || total_channels < 0 || error) {
-						ret = SR_ERR_DATA;
-						break;
-					}
-					sr_config_set(sdi, NULL, SR_CONF_NUM_LOGIC_CHANNELS,
-							g_variant_new_int32(total_channels));
-					for (k = 0; k < total_channels; k++) {
+				total_channels = g_key_file_get_integer(kf,
+						sections[i], keys[j], &error);
+				if (!sdi || total_channels < 0 || error) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				sr_config_set(sdi, NULL, SR_CONF_NUM_LOGIC_CHANNELS,
+						g_variant_new_int32(total_channels));
+				/* PXView v3 格式不含 unitsize，从 total probes 自动推算 */
+				if (unitsize == 0 && total_channels > 0) {
+					unitsize = (total_channels + 7) / 8;
+					sr_config_set(sdi, NULL, SR_CONF_CAPTURE_UNITSIZE,
+							g_variant_new_uint64(unitsize));
+				}
+				for (k = 0; k < total_channels; k++) {
 						g_snprintf(channelname, sizeof(channelname),
 								"%d", k);
 						sr_channel_new(sdi, k, SR_CHANNEL_LOGIC,
@@ -330,16 +364,36 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 								FALSE, channelname);
 					}
 				} else if (!strncmp(keys[j], "probe", 5)) {
-					tmp_u64 = g_ascii_strtoull(keys[j] + 5, NULL, 10);
-					if (!sdi || tmp_u64 == 0 || tmp_u64 > G_MAXINT) {
+				tmp_u64 = g_ascii_strtoull(keys[j] + 5, NULL, 10);
+				if (!sdi || tmp_u64 > G_MAXINT) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				/* PXView uses 0-based probe indices, upstream uses 1-based */
+				if (probe_zero_based) {
+					/* PXView: probe indices may be non-contiguous (e.g. 0,2,5,7).
+					 * Extend channel list if the index is beyond current size. */
+					int cur_len = g_slist_length(sdi->channels);
+					if (tmp_u64 >= (guint)cur_len) {
+						for (k = cur_len; k <= (int)tmp_u64; k++) {
+							g_snprintf(channelname, sizeof(channelname),
+									"Logic Channel %d", k);
+							sr_channel_new(sdi, k, SR_CHANNEL_LOGIC,
+									FALSE, channelname);
+						}
+					}
+					ch = g_slist_nth_data(sdi->channels, tmp_u64);
+				} else {
+					if (tmp_u64 == 0) {
 						ret = SR_ERR_DATA;
 						break;
 					}
 					ch = g_slist_nth_data(sdi->channels, tmp_u64 - 1);
-					if (!ch) {
-						ret = SR_ERR_DATA;
-						break;
-					}
+				}
+				if (!ch) {
+					ret = SR_ERR_DATA;
+					break;
+				}
 					val = g_key_file_get_string(kf, sections[i],
 							keys[j], &error);
 					if (!val) {
@@ -381,6 +435,20 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 				}
 			}
 			g_strfreev(keys);
+
+			/* PXView v3: recalculate unitsize from actual channel count.
+			 * total_probes is the count of *enabled* channels, but probe
+			 * indices may be non-contiguous (e.g. 0,2,5,7), so the actual
+			 * channel list can be larger. unitsize must cover all channels. */
+			if (probe_zero_based && sdi && unitsize > 0) {
+				int actual_channels = g_slist_length(sdi->channels);
+				int calc_unitsize = (actual_channels + 7) / 8;
+				if (calc_unitsize > unitsize) {
+					unitsize = calc_unitsize;
+					sr_config_set(sdi, NULL, SR_CONF_CAPTURE_UNITSIZE,
+							g_variant_new_uint64(unitsize));
+				}
+			}
 		}
 	}
 	g_strfreev(sections);
@@ -391,6 +459,59 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 		g_error_free(error);
 	}
 	return ret;
+}
+
+/**
+ * Load a session file and return the first device instance, without keeping
+ * the sr_session alive. The caller owns the returned sdi and is responsible
+ * for its lifecycle (adding it to its own session, freeing it when done).
+ *
+ * This is intended for applications (like PXView) that manage their own
+ * sr_session but need libsigrok to parse the session file format, configure
+ * channels, and set up the virtual session driver.
+ *
+ * Supports both upstream sigrok format (version/metadata + data-N chunks)
+ * and PXView v3 format (header + L-<ch>/<n> per-channel chunks).
+ *
+ * @param ctx The context in which to load.
+ * @param filename The session file to load.
+ *
+ * @return Pointer to a sr_dev_inst, or NULL on failure. The caller owns
+ *         the returned instance.
+ *
+ * @since 0.6.0
+ */
+SR_API struct sr_dev_inst *sr_session_load_file_device(
+		struct sr_context *ctx, const char *filename)
+{
+	struct sr_session *session = NULL;
+	struct sr_dev_inst *sdi = NULL;
+
+	if (sr_session_load(ctx, filename, &session) != SR_OK || !session) {
+		sr_err("Failed to load session file '%s'.", filename);
+		return NULL;
+	}
+
+	if (!session->devs) {
+		sr_err("Session file '%s' contains no devices.", filename);
+		sr_session_destroy(session);
+		return NULL;
+	}
+
+	sdi = session->devs->data;
+
+	/* Detach the sdi from the session's ownership so that
+	 * sr_session_destroy() won't free it. The caller takes ownership. */
+	session->owned_devs = g_slist_remove(session->owned_devs, sdi);
+
+	/* Destroy the session container. This frees the devs list and
+	 * remaining owned_devs, but our sdi was already detached above. */
+	sr_session_destroy(session);
+
+	sr_info("Loaded session file device '%s' (driver: %s).",
+		filename, sdi->driver ? sdi->driver->name : "unknown");
+
+	return sdi;
 }
 
 /** @} */
