@@ -47,6 +47,14 @@ static const char *logic_pattern_str[] = {
 	"graycode",
 };
 
+/* Operation mode strings for config_get/set/list. Indexed by enum demo_op_mode.
+ * Uses the SAME string values as pxlogic ("Buffer Mode"/"Stream Mode") so
+ * DeviceAgent::get_hardware_operation_mode() recognizes them without changes. */
+static const char *demo_op_mode_strs[] = {
+	[DEMO_OP_BUFFER] = "Buffer Mode",
+	[DEMO_OP_STREAM] = "Stream Mode",
+};
+
 static const uint32_t scanopts[] = {
 	SR_CONF_NUM_LOGIC_CHANNELS,
 	SR_CONF_NUM_ANALOG_CHANNELS,
@@ -67,6 +75,10 @@ static const uint32_t devopts[] = {
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_AVERAGING | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_AVG_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	/* Operation mode: Buffer Mode (default) / Stream Mode.
+	 * Mirrors pxlogic's SR_CONF_OPERATION_MODE so DeviceAgent's
+	 * is_stream_mode() / samplingbar dropdown work unchanged. */
+	SR_CONF_OPERATION_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
 	/* DSO device-level options */
@@ -235,6 +247,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->limit_frames = limit_frames;
 	devc->capture_ratio = 20;
 	devc->stl = NULL;
+	/* Default to Buffer Mode (trigger-aware, finite capture). User can
+	 * switch to Stream Mode via the samplingbar OPERATION_MODE dropdown. */
+	devc->op_mode = DEMO_OP_BUFFER;
 
 	/* DSO initialization. */
 	devc->num_dso_channels = num_dso_channels;
@@ -392,6 +407,12 @@ static int config_get(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_LIMIT_FRAMES:
 		*data = g_variant_new_uint64(devc->limit_frames);
+		break;
+	case SR_CONF_OPERATION_MODE:
+		/* Return current op_mode as string ("Buffer Mode"/"Stream Mode").
+		 * DeviceAgent::get_hardware_operation_mode() converts back to
+		 * LO_OP_BUFFER/LO_OP_STREAM for is_stream_mode() checks. */
+		*data = g_variant_new_string(demo_op_mode_strs[devc->op_mode]);
 		break;
 	case SR_CONF_AVERAGING:
 		*data = g_variant_new_boolean(devc->avg);
@@ -620,6 +641,17 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_LIMIT_FRAMES:
 		devc->limit_frames = g_variant_get_uint64(data);
 		break;
+	case SR_CONF_OPERATION_MODE: {
+		/* Validate via std_str_idx against demo_op_mode_strs[].
+		 * Returns DEMO_OP_BUFFER=0 / DEMO_OP_STREAM=1. */
+		int idx = std_str_idx(data, ARRAY_AND_SIZE(demo_op_mode_strs));
+		if (idx < 0)
+			return SR_ERR_ARG;
+		devc->op_mode = (enum demo_op_mode)idx;
+		sr_info("demo: set OPERATION_MODE='%s' (op_mode=%d)",
+		        demo_op_mode_strs[idx], idx);
+		break;
+	}
 	case SR_CONF_AVERAGING:
 		devc->avg = g_variant_get_boolean(data);
 		sr_dbg("%s averaging", devc->avg ? "Enabling" : "Disabling");
@@ -809,6 +841,11 @@ static int config_list(uint32_t key, GVariant **data,
 			return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
 		case SR_CONF_SAMPLERATE:
 			*data = std_gvar_samplerates_steps(ARRAY_AND_SIZE(samplerates));
+			break;
+		case SR_CONF_OPERATION_MODE:
+			/* Expose Buffer/Stream strings for the samplingbar dropdown.
+			 * Same string values as pxlogic so DeviceAgent code is shared. */
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_op_mode_strs));
 			break;
 		case SR_CONF_TRIGGER_MATCH:
 			*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
@@ -1001,8 +1038,22 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		devc->first_partial_logic_index,
 		devc->first_partial_logic_mask);
 
-	sr_session_source_add(sdi->session, -1, 0, 100,
+	sr_info("demo dev_acquisition_start: cur_samplerate=%" PRIu64
+		", limit_samples=%" PRIu64 ", limit_msec=%" PRIu64
+		", limit_frames=%" PRIu64 ", capture_ratio=%u"
+		", num_logic=%zu, num_analog=%zu, num_dso=%zu"
+		", enabled_logic=%zu, enabled_analog=%zu"
+		", stl=%p, logic_unitsize=%zu",
+		devc->cur_samplerate, devc->limit_samples, devc->limit_msec,
+		devc->limit_frames, devc->capture_ratio,
+		devc->num_logic_channels, devc->num_analog_channels,
+		devc->num_dso_channels,
+		devc->enabled_logic_channels, devc->enabled_analog_channels,
+		(void*)devc->stl, devc->logic_unitsize);
+
+	int _src_ret = sr_session_source_add(sdi->session, -1, 0, 100,
 			demo_prepare_data, (struct sr_dev_inst *)sdi);
+	sr_info("demo dev_acquisition_start: sr_session_source_add returned %d", _src_ret);
 
 	std_session_send_df_header(sdi);
 
@@ -1020,6 +1071,12 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
+
+	sr_info("demo dev_acquisition_stop: CALLED (sent_samples=%" PRIu64
+		", spent_us=%" PRId64 ", trigger_fired=%d)",
+		((struct dev_context *)sdi->priv)->sent_samples,
+		((struct dev_context *)sdi->priv)->spent_us,
+		(int)((struct dev_context *)sdi->priv)->trigger_fired);
 
 	sr_session_source_remove(sdi->session, -1);
 

@@ -682,6 +682,20 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	sdi = cb_data;
 	devc = sdi->priv;
 
+	static int _demo_tick_count = 0;
+	_demo_tick_count++;
+	sr_info("demo_prepare_data TICK #%d: stl=%p, trigger_fired=%d, "
+		"limit_samples=%" PRIu64 ", limit_msec=%" PRIu64 ", "
+		"sent_samples=%" PRIu64 ", spent_us=%" PRId64 ", "
+		"cur_samplerate=%" PRIu64 ", num_logic=%zu, num_analog=%zu, "
+		"num_dso=%zu, enabled_logic=%zu, enabled_analog=%zu",
+		_demo_tick_count, (void*)devc->stl, (int)devc->trigger_fired,
+		devc->limit_samples, devc->limit_msec,
+		devc->sent_samples, devc->spent_us,
+		devc->cur_samplerate, devc->num_logic_channels,
+		devc->num_analog_channels, devc->num_dso_channels,
+		devc->enabled_logic_channels, devc->enabled_analog_channels);
+
 	/*
 	 * DSO mode: send one complete frame per acquisition tick, then stop.
 	 * DSO channels coexist with logic/analog in the channel list, but in
@@ -712,6 +726,10 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	if (devc->cur_samplerate <= 0
 			|| (devc->num_logic_channels <= 0
 			&& devc->num_analog_channels <= 0)) {
+		sr_info("demo_prepare_data: EARLY STOP (samplerate=%" PRIu64
+			", num_logic=%zu, num_analog=%zu)",
+			devc->cur_samplerate, devc->num_logic_channels,
+			devc->num_analog_channels);
 		sr_dev_acquisition_stop(sdi);
 		return G_SOURCE_CONTINUE;
 	}
@@ -734,6 +752,10 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		else if (devc->limit_samples - devc->sent_samples < samples_todo)
 			samples_todo = devc->limit_samples - devc->sent_samples;
 	}
+
+	sr_info("demo_prepare_data: elapsed_us=%" PRId64 ", limit_us=%" PRId64
+		", todo_us=%" PRId64 ", samples_todo=%" PRIu64,
+		elapsed_us, limit_us, todo_us, samples_todo);
 
 	if (samples_todo == 0)
 		return G_SOURCE_CONTINUE;
@@ -766,46 +788,79 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 			sending_now = MIN(samples_todo - logic_done,
 					LOGIC_BUFSIZE / devc->logic_unitsize);
 			logic_generator(sdi, sending_now * devc->logic_unitsize);
-			/* Check for trigger and send pre-trigger data if needed */
+
+			trigger_offset = 0;
+			/* Trigger check: runs in BOTH modes. In Stream mode the trigger
+			 * just inserts a SR_DF_TRIGGER marker into the stream (via
+			 * std_session_send_df_trigger inside soft_trigger_logic_check).
+			 * In Buffer mode it gates data emission until fire. */
 			if (devc->stl && (!devc->trigger_fired)) {
+				sr_info("demo trigger check: sending_now=%" PRIu64
+					", logic_unitsize=%zu, data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x"
+					", stl->count=%d, op_mode=%d",
+					sending_now, devc->logic_unitsize,
+					devc->logic_data[0], devc->logic_data[1],
+					devc->logic_data[2], devc->logic_data[3],
+					devc->logic_data[4], devc->logic_data[5],
+					devc->logic_data[6], devc->logic_data[7],
+					devc->stl->count, devc->op_mode);
 				trigger_offset = soft_trigger_logic_check(devc->stl,
 						devc->logic_data, sending_now * devc->logic_unitsize,
 						&pre_trigger_samples);
+				sr_info("demo trigger check: soft_trigger_logic_check returned %d"
+					", pre_trigger_samples=%d",
+					(int)trigger_offset, pre_trigger_samples);
 				if (trigger_offset > -1) {
 					devc->trigger_fired = TRUE;
-					logic_done = pre_trigger_samples;
+					sr_info("demo trigger FIRED at offset %d (op_mode=%d)",
+						(int)trigger_offset, devc->op_mode);
+					/* In Buffer mode, reset logic_done to pre_trigger_samples
+					 * so pre-trigger data (already sent by soft_trigger_logic_check)
+					 * isn't double-counted. In Stream mode we already sent the
+					 * full buffer above, so just mark fired and continue. */
+					if (devc->op_mode == DEMO_OP_BUFFER)
+						logic_done = pre_trigger_samples;
 				}
-			} else
-				trigger_offset = 0;
+			}
 
-			/* Send logic samples if needed */
+			/* Send logic samples */
 			packet.type = SR_DF_LOGIC;
 			packet.payload = &logic;
 			logic.unitsize = devc->logic_unitsize;
 
-			if (devc->stl) {
-				if (devc->trigger_fired && (trigger_offset < (int)sending_now)) {
-					/* Send after-trigger data */
-					logic.length = (sending_now - trigger_offset) * devc->logic_unitsize;
-					logic.data = devc->logic_data + trigger_offset * devc->logic_unitsize;
-					logic_fixup_feed(devc, &logic);
-					sr_session_send(sdi, &packet);
-					logic_done += sending_now - trigger_offset;
-					/* End acquisition */
-					sr_dbg("Triggered, stopping acquisition.");
-					sr_dev_acquisition_stop(sdi);
-					break;
-				} else {
-					/* Send nothing */
-					logic_done += sending_now;
-				}
-			} else if (!devc->stl) {
-				/* No trigger defined, send logic samples */
+			if (!devc->stl) {
+				/* No trigger defined: always send full buffer (both modes). */
 				logic.length = sending_now * devc->logic_unitsize;
 				logic.data = devc->logic_data;
 				logic_fixup_feed(devc, &logic);
 				sr_session_send(sdi, &packet);
 				logic_done += sending_now;
+			} else if (devc->op_mode == DEMO_OP_STREAM) {
+				/* Stream mode: send the full buffer regardless of trigger
+				 * state. The trigger marker was already emitted by
+				 * soft_trigger_logic_check (SR_DF_TRIGGER). The frontend
+				 * ring buffer will display pre/post-trigger data together. */
+				logic.length = sending_now * devc->logic_unitsize;
+				logic.data = devc->logic_data;
+				logic_fixup_feed(devc, &logic);
+				sr_session_send(sdi, &packet);
+				logic_done += sending_now;
+			} else {
+				/* Buffer mode: only send AFTER trigger fires. Pre-trigger
+				 * samples are buffered inside soft_trigger_logic and sent
+				 * by soft_trigger_logic_check itself when the trigger fires. */
+				if (devc->trigger_fired && (trigger_offset < (int)sending_now)) {
+					logic.length = (sending_now - trigger_offset) * devc->logic_unitsize;
+					logic.data = devc->logic_data + trigger_offset * devc->logic_unitsize;
+					logic_fixup_feed(devc, &logic);
+					sr_session_send(sdi, &packet);
+					logic_done += sending_now - trigger_offset;
+				} else if (!devc->trigger_fired) {
+					/* Trigger not yet fired: send nothing. logic_done still
+					 * advances so we don't loop forever, but sent_samples
+					 * is NOT accumulated (see below). */
+					logic_done += sending_now;
+				}
 			}
 		}
 
@@ -824,7 +879,16 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	}
 
 	uint64_t min = MIN(logic_done, analog_done);
-	devc->sent_samples += min;
+	/* sent_samples accumulation policy:
+	 * - No trigger (stl==NULL): always accumulate (both modes).
+	 * - Stream mode: always accumulate — data is being sent continuously,
+	 *   trigger marker or not. limit_samples is the stop condition.
+	 * - Buffer mode + trigger not fired: do NOT accumulate — keeps the
+	 *   session alive waiting for trigger. spent_us still accumulates so
+	 *   limit_msec acts as a timeout. */
+	if (!devc->stl || devc->op_mode == DEMO_OP_STREAM || devc->trigger_fired) {
+		devc->sent_samples += min;
+	}
 	devc->sent_frame_samples += min;
 	devc->spent_us += todo_us;
 
@@ -853,7 +917,11 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 				sr_session_send(sdi, &packet);
 			}
 		}
-		sr_dbg("Requested number of samples reached.");
+		sr_info("demo_prepare_data: STOP condition met (sent_samples=%" PRIu64
+			", limit_samples=%" PRIu64 ", spent_us=%" PRId64
+			", limit_us=%" PRId64 ")",
+			devc->sent_samples, devc->limit_samples,
+			devc->spent_us, limit_us);
 		sr_dev_acquisition_stop(sdi);
 	} else if (devc->limit_frames) {
 		if (devc->sent_frame_samples == 0)

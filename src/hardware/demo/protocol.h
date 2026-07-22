@@ -109,6 +109,18 @@ enum analog_pattern_type {
 	PATTERN_ANALOG_RANDOM,
 };
 
+/* Operation mode — mirrors pxlogic's OP_BUFFER/OP_STREAM so the same
+ * DeviceAgent::is_stream_mode() / samplingbar code path works for demo.
+ * - OP_BUFFER: trigger-unhit buffers pre-trigger data inside soft_trigger_logic,
+ *   waits for trigger to fire, then sends post-trigger data until limit_samples.
+ * - OP_STREAM: continuously sends data regardless of trigger state; trigger
+ *   (if any) just inserts a SR_DF_TRIGGER marker into the stream. limit_samples
+ *   still acts as the stop condition (user-chosen capture depth). */
+enum demo_op_mode {
+	DEMO_OP_BUFFER = 0,
+	DEMO_OP_STREAM = 1,
+};
+
 static const char *analog_pattern_str[] = {
 	"square",
 	"sine",
@@ -127,6 +139,11 @@ struct dev_context {
 	uint64_t limit_samples;
 	uint64_t limit_msec;
 	uint64_t limit_frames;
+	/* Operation mode: DEMO_OP_BUFFER (default) or DEMO_OP_STREAM.
+	 * Set via SR_CONF_OPERATION_MODE config_set. Controls whether
+	 * demo_prepare_data sends data continuously (stream) or waits
+	 * for trigger (buffer). */
+	enum demo_op_mode op_mode;
 	uint64_t sent_samples;
 	uint64_t sent_frame_samples; /* Number of samples that were sent for current frame. */
 	int64_t start_us;

@@ -681,6 +681,9 @@ static gboolean delayed_stop_check(void *data)
 	session = data;
 	session->stop_check_id = 0;
 
+	sr_info("delayed_stop_check: invoked, running=%d, event_sources=%u",
+		(int)session->running, g_hash_table_size(session->event_sources));
+
 	/* Session already ended? */
 	if (!session->running)
 		return G_SOURCE_REMOVE;
@@ -841,8 +844,13 @@ SR_API int sr_session_start(struct sr_session *session)
 		return ret;
 	}
 
-	if (g_hash_table_size(session->event_sources) == 0)
+	if (g_hash_table_size(session->event_sources) == 0) {
+		sr_info("sr_session_start: event_sources is EMPTY after dev_acquisition_start, installing stop_check_later");
 		stop_check_later(session);
+	} else {
+		sr_info("sr_session_start: event_sources has %u entries, session will run normally",
+			g_hash_table_size(session->event_sources));
+	}
 
 	return SR_OK;
 }
