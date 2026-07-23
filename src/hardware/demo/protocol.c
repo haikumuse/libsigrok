@@ -399,6 +399,69 @@ static void logic_fixup_feed(struct dev_context *devc,
 	}
 }
 
+/*
+ * 对生成的模拟样本施加耦合效果 (模拟真实示波器模拟前端的 AC/DC/GND 耦合)。
+ *
+ * DSL 等真实硬件驱动通过 I2C 配置耦合继电器, 由硬件物理实现; demo 没有
+ * 硬件前端, 必须在软件层模拟。行为参考示波器耦合原理:
+ *   GND (0): 信号接地, 输出恒 0 (观察基线噪声/零点)
+ *   DC  (1): 直通, 信号原样通过 (保留直流分量)
+ *   AC  (2): 高通滤波, 去除直流分量 (一阶 RC, 截止频率 ~ 采样率/200)
+ *
+ * AC 耦合一阶 RC 高通: y[n] = a*(y[n-1] + x[n] - x[n-1])
+ *   a = RC/(RC+dt), dt = 1/samplerate, RC 选 ~200 个样本周期使低频被抑制。
+ */
+#define DEMO_AC_COUPLING_TAU 200.0f  /* RC 时间常数 (样本数) */
+
+static void apply_analog_coupling(struct analog_gen *ag,
+		struct dev_context *devc, float *data, unsigned int count)
+{
+	uint8_t coupling;
+	int aidx;
+
+	if (!ag->ch || !devc)
+		return;
+
+	/* 计算模拟通道索引 (与 api.c config_get/set 的 aidx 一致)。 */
+	aidx = ag->ch->index - devc->num_logic_channels;
+	if (aidx < 0 || aidx >= devc->num_analog_channels || aidx >= DSO_MAX_CHANNELS)
+		return;
+
+	coupling = devc->analog_coupling[aidx];
+
+	if (coupling == 1 /* SR_DC_COUPLING */)
+		return;  /* DC: 直通, 无处理 */
+
+	if (coupling == 0 /* SR_GND_COUPLING */) {
+		/* GND: 强制所有样本为 0。 */
+		for (unsigned int i = 0; i < count; i++)
+			data[i] = 0.0f;
+		/* 重置 AC 滤波器状态避免切换后跳变。 */
+		ag->ac_prev_input = 0.0f;
+		ag->ac_prev_output = 0.0f;
+		return;
+	}
+
+	if (coupling == 2 /* SR_AC_COUPLING */) {
+		/* 一阶 RC 高通滤波器: y[n] = a*(y[n-1] + x[n] - x[n-1]) */
+		const float a = DEMO_AC_COUPLING_TAU / (DEMO_AC_COUPLING_TAU + 1.0f);
+		float prev_in = ag->ac_prev_input;
+		float prev_out = ag->ac_prev_output;
+		for (unsigned int i = 0; i < count; i++) {
+			float x = data[i];
+			float y = a * (prev_out + x - prev_in);
+			data[i] = y;
+			prev_in = x;
+			prev_out = y;
+		}
+		ag->ac_prev_input = prev_in;
+		ag->ac_prev_output = prev_out;
+		return;
+	}
+
+	/* 未知耦合值, 按 DC 处理 (直通)。 */
+}
+
 static void send_analog_packet(struct analog_gen *ag,
 		struct sr_dev_inst *sdi, uint64_t *analog_sent,
 		uint64_t analog_pos, uint64_t analog_todo)
@@ -498,12 +561,21 @@ static void send_analog_packet(struct analog_gen *ag,
 	if (!devc->avg) {
 		ag_pattern_pos = analog_pos % pattern->num_samples;
 		sending_now = MIN(analog_todo, pattern->num_samples - ag_pattern_pos);
+		/* 判断当前通道耦合是否为 DC (直通)。非 DC 时即使 amplitude/offset
+		 * 未变也必须走慢速路径 (需修改样本), 不能直接指向 pattern->data。 */
+		int aidx_coupling = ag->ch ? ag->ch->index - devc->num_logic_channels : -1;
+		uint8_t cur_coupling = (aidx_coupling >= 0
+				&& aidx_coupling < devc->num_analog_channels
+				&& aidx_coupling < DSO_MAX_CHANNELS)
+			? devc->analog_coupling[aidx_coupling] : 1 /* DC */;
+		gboolean need_coupling = (cur_coupling != 1 /* DC */);
 		if (ag->amplitude != DEFAULT_ANALOG_AMPLITUDE ||
 			ag->offset != DEFAULT_ANALOG_OFFSET ||
-			ag->pattern == PATTERN_ANALOG_RANDOM) {
+			ag->pattern == PATTERN_ANALOG_RANDOM || need_coupling) {
 			/*
 			 * Amplitude or offset changed (or we are generating
-			 * random data), modify each sample.
+			 * random data, or coupling != DC needs per-sample
+			 * processing), modify each sample.
 			 */
 			if (ag->pattern == PATTERN_ANALOG_RANDOM) {
 				amplitude = ag->amplitude / 500.0;
@@ -512,7 +584,9 @@ static void send_analog_packet(struct analog_gen *ag,
 				amplitude = ag->amplitude / DEFAULT_ANALOG_AMPLITUDE;
 				offset = ag->offset - DEFAULT_ANALOG_OFFSET;
 			}
-			data = ag->packet.data;
+			/* 耦合处理时用 coupling_buf, 避免污染共享的 pattern->data
+			 * 或上一包的 packet.data。DC 耦合保持原逻辑用 packet.data。 */
+			data = need_coupling ? ag->coupling_buf : ag->packet.data;
 			for (i = 0; i < sending_now; i++) {
 				if (ag->pattern == PATTERN_ANALOG_RANDOM) {
 					/* Use pre-filled cyclic buffer for stable random
@@ -526,6 +600,9 @@ static void send_analog_packet(struct analog_gen *ag,
 				} else
 					data[i] = pattern->data[ag_pattern_pos + i] * amplitude + offset;
 			}
+			/* 应用耦合效果 (GND 置零 / AC 高通; DC 在 apply 内直通返回)。 */
+			apply_analog_coupling(ag, devc, data, sending_now);
+			ag->packet.data = data;
 		} else {
 			/* Amplitude and offset unchanged, use the fast way. */
 			ag->packet.data = pattern->data + ag_pattern_pos;
@@ -568,6 +645,9 @@ static void send_analog_packet(struct analog_gen *ag,
 		}
 
 do_send:
+		/* 对平均值也应用耦合 (avg 模式下每包只发 1 个样本, GND 直接置零,
+		 * AC 高通对单点退化为减去直流估计 — 用 prev_output 逼近)。 */
+		apply_analog_coupling(ag, devc, &ag->avg_val, 1);
 		ag->packet.data = &ag->avg_val;
 		ag->packet.num_samples = 1;
 
@@ -1073,6 +1153,8 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 					ag = value;
 					packet.type = SR_DF_ANALOG;
 					packet.payload = &ag->packet;
+					/* 应用耦合 (与 do_send 路径一致)。 */
+					apply_analog_coupling(ag, devc, &ag->avg_val, 1);
 					ag->packet.data = &ag->avg_val;
 					ag->packet.num_samples = 1;
 					sr_session_send(sdi, &packet);

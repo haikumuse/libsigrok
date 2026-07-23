@@ -204,8 +204,12 @@ static const uint64_t dso_vdivs[] = {
 	SR_mV(200), SR_mV(500), SR_V(1), SR_V(2),
 };
 
-/* DSO coupling modes. */
-static const int32_t dso_couplings[] = { 0 /*GND*/, 1 /*DC*/, 2 /*AC*/ };
+/* DSO coupling modes. 类型必须为 uint8_t: ProbeOptions::bind_coupling 期望
+ * LIST 返回 {"coupling": [uint8...]} (G_VARIANT_TYPE("y")), 且 print_coupling
+ * 用 g_variant_get(gvar, "y", ...) 读取。旧代码声明为 int32_t[] 导致
+ * g_variant_new_fixed_array 只拷贝前 3 字节 (ARRAY_SIZE*sizeof(uint8_t)=3),
+ * 小端序 int32{0,1,2} 的前 3 字节全为 0 → 3 个 GND。 */
+static const uint8_t dso_couplings[] = { 0 /*GND*/, 1 /*DC*/, 2 /*AC*/ };
 
 /* DSO timebase list (ns). */
 static const uint64_t dso_timebases[] = {
@@ -390,6 +394,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	for (i = 0; i < num_analog_channels && i < DSO_MAX_CHANNELS; i++) {
 		devc->analog_vdiv[i] = DSO_DEFAULT_VDIV;
 		devc->analog_coupling[i] = DSO_DEFAULT_COUPLING;
+		devc->analog_map_default[i] = TRUE;  /* map fields disabled until user unchecks */
 	}
 	for (i = 0; i < num_dso_channels && i < DSO_MAX_CHANNELS; i++) {
 		devc->dso_vdiv[i] = DSO_DEFAULT_VDIV;
@@ -477,6 +482,8 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			ag->pattern = pattern;
 			ag->avg_val = 0.0f;
 			ag->num_avgs = 0;
+			ag->ac_prev_input = 0.0f;
+			ag->ac_prev_output = 0.0f;
 			g_hash_table_insert(devc->ch_ag, ch, ag);
 
 			if (++pattern == ARRAY_SIZE(analog_pattern_str))
@@ -779,10 +786,15 @@ static int config_get(uint32_t key, GVariant **data,
 				*data = g_variant_new_uint64(devc->analog_vdiv[aidx]);
 			break;
 		case SR_CONF_PROBE_COUPLING:
+			/* 返回 byte ("y") 而非 int32 ("i"): ProbeOptions::print_coupling
+			 * 用 g_variant_get(gvar,"y",...) 读取, Enum::get_widget 用
+			 * g_variant_compare(list_byte, get_byte) 匹配当前值。
+			 * 旧代码返回 int32 导致类型不匹配 → setCurrentIndex 永不触发
+			 * → 下拉框始终停在 index 0 (第一个 GND)。 */
 			if (is_dso)
-				*data = g_variant_new_int32((int32_t)devc->dso_coupling[idx]);
+				*data = g_variant_new_byte(devc->dso_coupling[idx]);
 			else
-				*data = g_variant_new_int32((int32_t)devc->analog_coupling[aidx]);
+				*data = g_variant_new_byte(devc->analog_coupling[aidx]);
 			break;
 		case SR_CONF_TRIGGER_VALUE:
 			if (!is_dso) return SR_ERR_ARG;
@@ -813,7 +825,13 @@ static int config_get(uint32_t key, GVariant **data,
 				*data = g_variant_new_boolean(TRUE);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
-			*data = g_variant_new_boolean(TRUE);
+			/* 返回每通道存储的状态, 使 UI 能在用户取消 "map default"
+			 * 复选框后启用 map unit/min/max 字段。DSO 通道无独立存储,
+			 * 保留旧行为 (恒 TRUE)。 */
+			if (is_analog)
+				*data = g_variant_new_boolean(devc->analog_map_default[aidx]);
+			else
+				*data = g_variant_new_boolean(TRUE);
 			break;
 		case SR_CONF_PROBE_MAP_UNIT:
 			*data = g_variant_new_string(dso_map_units[0]);
@@ -1104,10 +1122,13 @@ static int config_set(uint32_t key, GVariant *data,
 				devc->analog_vdiv[aidx] = g_variant_get_uint64(data);
 			break;
 		case SR_CONF_PROBE_COUPLING:
+			/* 用 g_variant_get_byte 而非 g_variant_get_int32:
+			 * Enum::commit() 发送的 GVariant 来自 LIST 项 (byte 类型 "y"),
+			 * g_variant_get_int32 对 byte 变体返回 0 → SET 静默失败。 */
 			if (is_dso)
-				devc->dso_coupling[idx] = (uint8_t)g_variant_get_int32(data);
+				devc->dso_coupling[idx] = g_variant_get_byte(data);
 			else
-				devc->analog_coupling[aidx] = (uint8_t)g_variant_get_int32(data);
+				devc->analog_coupling[aidx] = g_variant_get_byte(data);
 			break;
 		case SR_CONF_TRIGGER_VALUE:
 			if (!is_dso) return SR_ERR_ARG;
@@ -1137,6 +1158,13 @@ static int config_set(uint32_t key, GVariant *data,
 				devc->dso_enabled[idx] = g_variant_get_boolean(data);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
+			/* 存储每通道 map_default 状态, 使后续 GET 返回用户选择。
+			 * 旧代码 "accept but ignore" 导致 GET 恒返回 TRUE,
+			 * map unit/min/max 永远被 UI 禁用。 */
+			if (is_analog)
+				devc->analog_map_default[aidx] = g_variant_get_boolean(data);
+			/* DSO 通道仍忽略 (无独立存储)。 */
+			break;
 		case SR_CONF_PROBE_MAP_UNIT:
 		case SR_CONF_PROBE_MAP_MIN:
 		case SR_CONF_PROBE_MAP_MAX:

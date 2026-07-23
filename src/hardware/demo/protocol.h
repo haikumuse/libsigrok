@@ -285,6 +285,12 @@ struct dev_context {
 	/* DAQ per-channel probe config (vdiv/coupling for ANALOG channels). */
 	uint64_t analog_vdiv[DSO_MAX_CHANNELS];
 	uint8_t analog_coupling[DSO_MAX_CHANNELS];
+	/* Per-channel "map default" toggle. When TRUE (default), map unit/min/max
+	 * use driver defaults and are disabled in the UI; when user unchecks the
+	 * "map default" checkbox, SET stores FALSE so GET returns FALSE and the
+	 * UI enables the map fields for editing. Old code ignored SET and GET
+	 * always returned TRUE → map unit/min/max permanently disabled. */
+	gboolean analog_map_default[DSO_MAX_CHANNELS];
 	gboolean avg; /* True if averaging is enabled */
 	uint64_t avg_samples;
 	size_t enabled_logic_channels;
@@ -394,6 +400,15 @@ struct analog_gen {
 	struct sr_analog_spec spec;
 	float avg_val; /* Average value */
 	unsigned int num_avgs; /* Number of samples averaged */
+	/* AC coupling 高通滤波器状态 (模拟真实 AC 耦合电容)。
+	 * 一阶 RC 高通: y[n] = a*(y[n-1] + x[n] - x[n-1]), a = RC/(RC+dt)。
+	 * 保持每通道独立状态, 跨包连续。demo 的 analog_coupling==AC 时启用。 */
+	float ac_prev_input;
+	float ac_prev_output;
+	/* 耦合处理临时缓冲区。fast-path (amplitude/offset 未变) 原本直接指向
+	 * pattern->data, 但 GND/AC 耦合需修改样本, 不能污染共享的 pattern。
+	 * 仅在 coupling != DC 时用作拷贝目标。 */
+	float coupling_buf[ANALOG_BUFSIZE];
 };
 
 SR_PRIV void demo_generate_analog_pattern(struct dev_context *devc);
