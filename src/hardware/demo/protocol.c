@@ -514,9 +514,16 @@ static void send_analog_packet(struct analog_gen *ag,
 			}
 			data = ag->packet.data;
 			for (i = 0; i < sending_now; i++) {
-				if (ag->pattern == PATTERN_ANALOG_RANDOM)
-					data[i] = (rand() % 1000) * amplitude + offset;
-				else
+				if (ag->pattern == PATTERN_ANALOG_RANDOM) {
+					/* Use pre-filled cyclic buffer for stable random
+					 * data (repeats like a real captured signal). */
+					if (devc->analog_random_buf)
+						data[i] = (devc->analog_random_buf[
+							(analog_pos + i) % devc->analog_random_buf_len]
+							/ 255.0 * 1000) * amplitude + offset;
+					else
+						data[i] = (rand() % 1000) * amplitude + offset;
+				} else
 					data[i] = pattern->data[ag_pattern_pos + i] * amplitude + offset;
 			}
 		} else {
@@ -572,18 +579,95 @@ do_send:
 	}
 }
 
+/* Clear DSO config-change flags. demo_send_dso_packet() regenerates the
+ * waveform on every call from current dso_pattern/vdiv/offset/timebase, so
+ * the flags only need clearing to mark "regeneration consumed". Mirrors old
+ * fork demo's dso_wavelength_updata() contract: config_set sets a flag, the
+ * next packet send regenerates and clears it. */
+SR_PRIV void dso_wavelength_updata(struct dev_context *devc)
+{
+	if (!devc)
+		return;
+	devc->dso_vdiv_change = FALSE;
+	devc->dso_offset_change = FALSE;
+	devc->dso_timebase_change = FALSE;
+}
+
+/* Pre-fill the analog random cyclic buffer. Called once at acquisition start
+ * so PATTERN_ANALOG_RANDOM streams a stable, repeating noise pattern (like a
+ * real captured signal) instead of fresh random noise every packet. Mirrors
+ * old fork demo's init_analog_random_data(). */
+SR_PRIV int init_analog_random_data(struct dev_context *devc)
+{
+	size_t i;
+
+	if (!devc)
+		return SR_ERR_ARG;
+	if (!devc->analog_random_buf) {
+		devc->analog_random_buf = g_malloc(ANALOG_RANDOM_BUF_LEN);
+		if (!devc->analog_random_buf)
+			return SR_ERR_MALLOC;
+		devc->analog_random_buf_len = ANALOG_RANDOM_BUF_LEN;
+	}
+	for (i = 0; i < devc->analog_random_buf_len; i++)
+		devc->analog_random_buf[i] = (uint8_t)(rand() & 0xff);
+	devc->analog_random_read_pos = 0;
+	return SR_OK;
+}
+
+/* Generate one 8-bit DSO sample for the given pattern at sample index i.
+ * wavelength = samples per period. mid/amp define the vertical range.
+ * ch_idx adds a small phase offset per channel so traces don't overlap. */
+static uint8_t demo_dso_sample(enum demo_dso_pattern pat, uint64_t i,
+		uint8_t mid, uint8_t amp, int ch_idx, uint64_t wavelength)
+{
+	uint64_t pos;
+	double val;
+
+	switch (pat) {
+	case DEMO_DSO_PATTERN_RANDOM:
+		return (uint8_t)((rand() % 120) + 68);
+	case DEMO_DSO_PATTERN_SINE:
+		/* Per-channel phase offset so channels don't overlap. */
+		val = mid + amp * sin(2.0 * M_PI * (i + ch_idx * (wavelength / 4))
+				/ (double)wavelength);
+		if (val < 0) val = 0;
+		if (val > 255) val = 255;
+		return (uint8_t)val;
+	case DEMO_DSO_PATTERN_SQUARE:
+		pos = (i + ch_idx * (wavelength / 2)) % wavelength;
+		return (pos < wavelength / 2) ? (uint8_t)(mid + amp) : (uint8_t)(mid - amp);
+	case DEMO_DSO_PATTERN_SAWTOOTH:
+		pos = (i + ch_idx * (wavelength / 4)) % wavelength;
+		return (uint8_t)(mid - amp + (uint16_t)(2 * amp * pos / wavelength));
+	case DEMO_DSO_PATTERN_TRIANGLE:
+		pos = (i + ch_idx * (wavelength / 4)) % wavelength;
+		if (pos < wavelength / 2)
+			return (uint8_t)(mid - amp
+				+ (uint16_t)(2 * amp * pos / (wavelength / 2)));
+		else
+			return (uint8_t)(mid + amp
+				- (uint16_t)(2 * amp * (pos - wavelength / 2) / (wavelength / 2)));
+	default:
+		return mid;
+	}
+}
+
 /*
  * Send one DSO frame (one SR_DF_DSO packet) for the demo device.
  *
- * Generates random waveform data (range ~68..187, around the 128 mid value
- * for 8-bit DSO samples) for each enabled DSO channel, interleaved as
+ * Generates waveform data based on devc->dso_pattern (random/sine/square/
+ * sawtooth/triangle) for each enabled DSO channel, interleaved as
  * [ch0_s0, ch1_s0, ch0_s1, ch1_s1, ...] which matches the layout expected
- * by DsoSnapshot::append_data().
+ * by DsoSnapshot::append_data(). Per-channel vdiv/offset/trig_value apply
+ * vertical shifts so the traces look distinct.
  *
+ * In instant mode, sends a progressive slice based on elapsed time rather
+ * than the full frame, so the GUI shows a live scrolling waveform.
  * After sending the packet the acquisition is stopped — DSO mode delivers
  * one complete frame per acquisition (single-shot). The caller may restart
- * acquisition for the next frame (repeat/loop mode handled by the upper
- * CaptureManager layer).
+ * acquisition for the next frame (repeat/loop mode handled in
+ * dev_acquisition_stop).
  */
 SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 {
@@ -595,12 +679,19 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 	uint8_t en_ch_num;
 	uint8_t *p;
 	uint64_t i;
+	uint64_t sending_samples;
+	uint64_t wavelength;
+	uint8_t mid, amp;
 	int ch_idx;
 
 	if (!sdi || !sdi->priv)
 		return SR_ERR_ARG;
 
 	devc = sdi->priv;
+
+	/* Consume any pending config-change flags (regeneration is implicit
+	 * — we build the waveform from current config on every call). */
+	dso_wavelength_updata(devc);
 
 	/* Count enabled DSO channels. */
 	en_ch_num = 0;
@@ -612,28 +703,51 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 	if (en_ch_num == 0)
 		return SR_ERR;
 
-	/* (Re)allocate the DSO buffer if needed. */
+	/* In instant mode, send a progressive slice based on how many samples
+	 * have already been sent, so the GUI shows a live scrolling waveform.
+	 * Otherwise send the full frame (single-shot DSO). */
+	sending_samples = DSO_PACKET_LEN;
+	if (devc->instant && devc->dso_sent_samples > 0) {
+		/* Send a fraction of the remaining frame each tick. */
+		uint64_t remaining = (devc->dso_sent_samples >= DSO_PACKET_LEN)
+			? 0 : (DSO_PACKET_LEN - devc->dso_sent_samples);
+		if (remaining > 0)
+			sending_samples = MIN(remaining, DSO_PACKET_LEN / 10);
+		else
+			sending_samples = DSO_PACKET_LEN; /* wrap: start a new frame */
+	}
+
+	/* (Re)allocate the DSO buffer if needed (full-frame sized). */
 	if (!devc->dso_buf) {
 		devc->dso_buf = g_malloc(DSO_PACKET_LEN * en_ch_num);
 		if (!devc->dso_buf)
 			return SR_ERR_MALLOC;
 	}
 
+	/* Waveform geometry: ~4 periods across the screen. mid=128 (8-bit
+	 * center). amp scales with the first enabled channel's vdiv so
+	 * changing vdiv visibly changes amplitude. */
+	wavelength = DSO_PACKET_LEN / 4;
+	if (wavelength < 20)
+		wavelength = 20;
+	mid = 128;
+	amp = 60;
+
 	/*
-	 * Fill interleaved samples. Each channel gets the same random pattern
-	 * offset by channel index so the traces look distinct. The data range
-	 * 68..187 straddles the 128 mid-scale used by 8-bit DSO rendering.
+	 * Fill interleaved samples using the selected DSO pattern. Each
+	 * channel gets a phase offset (via ch_idx) so traces don't overlap.
+	 * Per-channel trigger-value shifts the baseline vertically.
 	 */
 	p = devc->dso_buf;
-	for (i = 0; i < DSO_PACKET_LEN; i++) {
+	for (i = devc->dso_sent_samples; i < devc->dso_sent_samples + sending_samples; i++) {
 		ch_idx = 0;
 		for (l = sdi->channels; l; l = l->next) {
 			ch = l->data;
 			if (!ch || ch->type != SR_CHANNEL_DSO || !ch->enabled)
 				continue;
-			/* Per-channel variation: shift + small phase offset. */
-			uint8_t v = (uint8_t)((rand() % 120) + 68);
-			/* Apply per-channel trigger-value offset so traces don't overlap. */
+			uint8_t v = demo_dso_sample(devc->dso_pattern, i,
+					mid, amp, ch_idx, wavelength);
+			/* Apply per-channel trigger-value offset. */
 			if (ch_idx < DSO_MAX_CHANNELS)
 				v = (uint8_t)(v + (uint8_t)(devc->dso_trig_value[ch_idx] - 128));
 			*p++ = v;
@@ -643,20 +757,29 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 
 	/* Build and send the DSO packet. */
 	dso.data = devc->dso_buf;
-	dso.num_samples = DSO_PACKET_LEN;
+	dso.num_samples = sending_samples;
 	dso.trig_flag = 1;            /* Trigger found in this packet. */
 	dso.trig_ch = 0;              /* First enabled DSO channel. */
 	dso.en_ch_num = en_ch_num;
 	dso.sample_bits = devc->dso_unit_bits;
-	dso.trig_offset = (int16_t)(DSO_PACKET_LEN / 2);  /* Trigger at center. */
-	dso.packet_len = DSO_PACKET_LEN * en_ch_num;
+	dso.trig_offset = (int16_t)(sending_samples / 2);  /* Trigger at center. */
+	dso.packet_len = sending_samples * en_ch_num;
 	dso.samplerate_tog = (uint32_t)devc->cur_samplerate;
+
+	/* Apply per-channel vdiv scaling before sending — mirrors old fork
+	 * demo's receive_data_dso vdiv transform. The dso_buf layout is
+	 * interleaved [ch0_s0, ch1_s0, ch0_s1, ...] so ch_idx = i % 2. */
+	demo_dso_vdiv_scale(devc, devc->dso_buf, dso.packet_len);
 
 	packet.type = SR_DF_DSO;
 	packet.payload = &dso;
 	sr_session_send(sdi, &packet);
 
-	devc->dso_sent_samples += DSO_PACKET_LEN;
+	/* Update DSO measurement stats (max/min/cycle/acc_*) after sending
+	 * — mirrors old fork dso_status_update() call in receive_data_dso. */
+	demo_dso_status_update(devc, devc->dso_buf, dso.packet_len);
+
+	devc->dso_sent_samples += sending_samples;
 
 	return SR_OK;
 }
@@ -682,6 +805,22 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	sdi = cb_data;
 	devc = sdi->priv;
 
+	/* .demo file replay: if a non-random sample source with an open
+	 * archive is set, route to the mode-specific receive_data_*_file
+	 * function instead of the math-generator streaming path below. */
+	if (devc->sample_generator != DEMO_GEN_RANDOM && devc->archive) {
+		switch (devc->device_mode) {
+		case DEMO_MODE_LOGIC:
+			return demo_receive_data_logic_decoder(sdi);
+		case DEMO_MODE_DSO:
+			return demo_receive_data_dso_file(sdi);
+		case DEMO_MODE_ANALOG:
+			return demo_receive_data_analog_file(sdi);
+		default:
+			break;
+		}
+	}
+
 	static int _demo_tick_count = 0;
 	_demo_tick_count++;
 	sr_info("demo_prepare_data TICK #%d: stl=%p, trigger_fired=%d, "
@@ -697,10 +836,14 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		devc->enabled_logic_channels, devc->enabled_analog_channels);
 
 	/*
-	 * DSO mode: send one complete frame per acquisition tick, then stop.
+	 * DSO mode: send one complete frame per acquisition tick.
 	 * DSO channels coexist with logic/analog in the channel list, but in
 	 * DSO work mode only DSO channels are enabled — detect that and skip
 	 * the streaming logic/analog path entirely.
+	 *
+	 * In single-shot mode (non-instant, non-loop): send one full frame then
+	 * stop. In instant mode: send progressive slices (live scrolling). In
+	 * loop mode: send full frames continuously (timer stays alive).
 	 */
 	if (devc->num_dso_channels > 0) {
 		gboolean has_enabled_dso = FALSE;
@@ -717,7 +860,15 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		if (has_enabled_dso && !has_enabled_other) {
 			/* Pure DSO acquisition. */
 			demo_send_dso_packet(sdi);
-			sr_dev_acquisition_stop(sdi);
+			/* When a full frame has been sent, reset the counter so the
+			 * next tick starts a fresh frame (instant mode wraps mid-frame). */
+			if (devc->dso_sent_samples >= DSO_PACKET_LEN)
+				devc->dso_sent_samples = 0;
+			if (!devc->instant && !devc->loop_mode) {
+				/* Single-shot: one full frame, then stop. */
+				sr_dev_acquisition_stop(sdi);
+			}
+			/* Instant/loop: timer stays alive, next tick sends more. */
 			return G_SOURCE_CONTINUE;
 		}
 	}
@@ -905,24 +1056,35 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	if ((devc->limit_samples > 0 && devc->sent_samples >= devc->limit_samples)
 			|| (limit_us > 0 && devc->spent_us >= limit_us)) {
 
-		/* If we're averaging everything - now is the time to send data */
-		if (devc->avg && devc->avg_samples == 0) {
-			g_hash_table_iter_init(&iter, devc->ch_ag);
-			while (g_hash_table_iter_next(&iter, NULL, &value)) {
-				ag = value;
-				packet.type = SR_DF_ANALOG;
-				packet.payload = &ag->packet;
-				ag->packet.data = &ag->avg_val;
-				ag->packet.num_samples = 1;
-				sr_session_send(sdi, &packet);
+		if (devc->loop_mode) {
+			/* Loop mode: wrap counters and keep streaming instead of
+			 * stopping. The session timer stays alive so data flows
+			 * continuously until the user presses stop. */
+			sr_info("demo_prepare_data: LOOP wrap (sent_samples=%" PRIu64
+				" -> 0, spent_us=%" PRId64 " -> 0)",
+				devc->sent_samples, devc->spent_us);
+			devc->sent_samples = 0;
+			devc->spent_us = 0;
+		} else {
+			/* If we're averaging everything - now is the time to send data */
+			if (devc->avg && devc->avg_samples == 0) {
+				g_hash_table_iter_init(&iter, devc->ch_ag);
+				while (g_hash_table_iter_next(&iter, NULL, &value)) {
+					ag = value;
+					packet.type = SR_DF_ANALOG;
+					packet.payload = &ag->packet;
+					ag->packet.data = &ag->avg_val;
+					ag->packet.num_samples = 1;
+					sr_session_send(sdi, &packet);
+				}
 			}
+			sr_info("demo_prepare_data: STOP condition met (sent_samples=%" PRIu64
+				", limit_samples=%" PRIu64 ", spent_us=%" PRId64
+				", limit_us=%" PRId64 ")",
+				devc->sent_samples, devc->limit_samples,
+				devc->spent_us, limit_us);
+			sr_dev_acquisition_stop(sdi);
 		}
-		sr_info("demo_prepare_data: STOP condition met (sent_samples=%" PRIu64
-			", limit_samples=%" PRIu64 ", spent_us=%" PRId64
-			", limit_us=%" PRId64 ")",
-			devc->sent_samples, devc->limit_samples,
-			devc->spent_us, limit_us);
-		sr_dev_acquisition_stop(sdi);
 	} else if (devc->limit_frames) {
 		if (devc->sent_frame_samples == 0)
 			std_session_send_df_frame_begin(sdi);
@@ -930,3 +1092,1039 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 
 	return G_SOURCE_CONTINUE;
 }
+
+/* =====================================================================
+ * .demo file replay support (ported from old fork demo driver).
+ * The .demo file format is a zip archive containing:
+ *   - 'header'        : INI metadata (samplerate / total samples / total
+ *                       blocks / total probes / probeN names)
+ *   - L-<ch>/<block> : per-channel per-block logic data (byte-interleaved)
+ *   - O-<ch>/0       : per-channel single-block DSO data
+ *   - A-0/0          : single-channel single-block analog data
+ * Files live under <user_config_dir>/demo/<mode>/<name>.demo.
+ * ===================================================================== */
+
+/* Return the demo file root directory: <user_config_dir>/demo/.
+ * Caller owns the returned string (g_free). Mirrors old fork's
+ * DS_USR_PATH/demo/ layout. */
+SR_PRIV char *demo_get_root_dir(void)
+{
+	const gchar *cfg_dir;
+	char *path;
+
+	cfg_dir = g_get_user_config_dir();
+	if (!cfg_dir)
+		cfg_dir = ".";
+	path = g_build_filename(cfg_dir, "demo", NULL);
+	return path;
+}
+
+/* Close any open zip archive. Safe to call when archive is NULL. */
+SR_PRIV void demo_close_archive(struct dev_context *devc)
+{
+	if (!devc)
+		return;
+	if (devc->archive) {
+		unzClose(devc->archive);
+		devc->archive = NULL;
+	}
+}
+
+/* Scan <root>/<sub_dir>/ for *.demo files and store their basenames
+ * (without the .demo suffix) into info->patterns[]. Index 0 is always
+ * the static literal "random" (DEMO_GEN_RANDOM). Returns SR_OK even when
+ * the directory does not exist (only "random" available in that case). */
+SR_PRIV int demo_get_pattern_mode_from_file(const char *sub_dir,
+	struct demo_mode_pattern *info, int max_count)
+{
+	char *root, *dir_path, *full, *name;
+	GDir *dir;
+	const char *filename;
+	int num = 1;
+
+	if (!sub_dir || !info || max_count < 1)
+		return SR_ERR_ARG;
+
+	/* Index 0 is always the literal "random" — never freed by clear_helper
+	 * (which only frees indices >= 1). */
+	info->patterns[0] = (char *)"random";
+	info->count = 1;
+
+	root = demo_get_root_dir();
+	dir_path = g_build_filename(root, sub_dir, NULL);
+	g_free(root);
+
+	dir = g_dir_open(dir_path, 0, NULL);
+	if (!dir) {
+		g_free(dir_path);
+		return SR_OK;  /* directory missing — only random available */
+	}
+
+	while ((filename = g_dir_read_name(dir)) != NULL && num < max_count) {
+		full = g_build_filename(dir_path, filename, NULL);
+		if (!g_file_test(full, G_FILE_TEST_IS_DIR) &&
+		    g_str_has_suffix(filename, ".demo")) {
+			/* Strip the ".demo" suffix (5 chars). */
+			name = g_strndup(filename, strlen(filename) - 5);
+			info->patterns[num] = name;
+			num++;
+		}
+		g_free(full);
+	}
+	g_dir_close(dir);
+	g_free(dir_path);
+	info->count = num;
+	return SR_OK;
+}
+
+/* Find the index of str in devc->demo_pattern_array[mode].patterns[].
+ * Returns the matching index, or -1 if not found. */
+SR_PRIV int demo_get_pattern_mode_index_by_string(struct dev_context *devc,
+	int mode, const char *str)
+{
+	int i;
+	struct demo_mode_pattern *info;
+
+	if (!devc || !str || mode < 0 || mode > 2)
+		return -1;
+
+	info = &devc->demo_pattern_array[mode];
+	for (i = 0; i < info->count; i++) {
+		if (info->patterns[i] && strcmp(info->patterns[i], str) == 0)
+			return i;
+	}
+	return -1;
+}
+
+/* Build the absolute path to the .demo file for the given pattern_mode and
+ * store it in devc->demo_file_path (g_free'd before re-alloc). Returns
+ * SR_ERR if pattern_mode is out of range; SR_OK otherwise. */
+SR_PRIV int demo_reset_dsl_path(struct sr_dev_inst *sdi, uint8_t pattern_mode)
+{
+	struct dev_context *devc = sdi->priv;
+	static const char *const mode_names[] = { "logic", "dso", "analog" };
+	struct demo_mode_pattern *info;
+	char *root, *mode_dir, *file_path = NULL;
+	int mode = (int)devc->device_mode;
+
+	g_free(devc->demo_file_path);
+
+	if (pattern_mode != DEMO_GEN_RANDOM) {
+		if (mode < 0 || mode > 2) {
+			devc->demo_file_path = g_strdup("");
+			return SR_ERR;
+		}
+		info = &devc->demo_pattern_array[mode];
+		if (pattern_mode >= (uint8_t)info->count || !info->patterns[pattern_mode]) {
+			devc->demo_file_path = g_strdup("");
+			return SR_ERR;
+		}
+		root = demo_get_root_dir();
+		mode_dir = g_build_filename(root, mode_names[mode], NULL);
+		file_path = g_strdup_printf("%s/%s.demo",
+			mode_dir, info->patterns[pattern_mode]);
+		g_free(mode_dir);
+		g_free(root);
+		devc->demo_file_path = file_path;
+	} else {
+		/* Math-generated mode — no file. */
+		devc->demo_file_path = g_strdup("");
+	}
+	return SR_OK;
+}
+
+/* First-open initialization: scan all three mode subdirectories for .demo
+ * files, then pick the default LOGIC pattern (DEFAULT_LOGIC_FILE). */
+SR_PRIV void demo_scan_dsl_file(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	int dex;
+
+	if (!devc->b_load_directory) {
+		demo_get_pattern_mode_from_file("logic",
+			&devc->demo_pattern_array[DEMO_MODE_LOGIC], PATTERN_COUNT);
+		demo_get_pattern_mode_from_file("dso",
+			&devc->demo_pattern_array[DEMO_MODE_DSO], PATTERN_COUNT);
+		demo_get_pattern_mode_from_file("analog",
+			&devc->demo_pattern_array[DEMO_MODE_ANALOG], PATTERN_COUNT);
+		devc->b_load_directory = TRUE;
+	}
+
+	dex = demo_get_pattern_mode_index_by_string(devc, DEMO_MODE_LOGIC,
+		DEFAULT_LOGIC_FILE);
+	if (dex == -1)
+		dex = DEMO_GEN_RANDOM;
+	devc->sample_generator = (uint8_t)dex;
+	devc->device_mode = DEMO_MODE_LOGIC;
+	demo_reset_dsl_path(sdi, devc->sample_generator);
+}
+
+/* Open the .demo zip archive and parse its 'header' INI to populate
+ * devc->cur_samplerate / total_samples / limit_samples / num_blocks /
+ * num_probes. Channels are NOT rebuilt (the new design toggles ch->enabled
+ * instead — see api.c config_set SR_CONF_DEVICE_MODE). If the archive
+ * cannot be opened or has no header, falls back to RANDOM mode with
+ * mode-specific defaults. Sets devc->load_data = TRUE on success so the
+ * receive_data_*_file functions know data is ready to be read. */
+SR_PRIV int demo_load_virtual_device_session(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	char *metafile = NULL;
+	GKeyFile *kf = NULL;
+	char **sections = NULL, **keys = NULL, *val = NULL;
+	gsize ngroups, nkeys;
+	gsize i, j;
+
+	demo_close_archive(devc);
+	devc->cur_block = 0;
+
+	if (devc->sample_generator != DEMO_GEN_RANDOM &&
+	    devc->demo_file_path && devc->demo_file_path[0] != '\0') {
+		/* Open the .demo zip archive. */
+		devc->archive = unzOpen64(devc->demo_file_path);
+		if (!devc->archive) {
+			sr_warn("demo: failed to open '%s', falling back to random.",
+				devc->demo_file_path);
+			devc->sample_generator = DEMO_GEN_RANDOM;
+			goto set_defaults;
+		}
+
+		/* Locate the 'header' file inside the zip. */
+		if (unzLocateFile(devc->archive, "header", 0) != UNZ_OK) {
+			sr_warn("demo: no 'header' in '%s', falling back to random.",
+				devc->demo_file_path);
+			demo_close_archive(devc);
+			devc->sample_generator = DEMO_GEN_RANDOM;
+			goto set_defaults;
+		} else {
+			unz_file_info64 info;
+			if (unzGetCurrentFileInfo64(devc->archive, &info, NULL, 0,
+					NULL, 0, NULL, 0) != UNZ_OK) {
+				sr_warn("demo: unzGetCurrentFileInfo64 failed, "
+					"falling back to random.");
+				demo_close_archive(devc);
+				devc->sample_generator = DEMO_GEN_RANDOM;
+				goto set_defaults;
+			}
+			metafile = g_malloc(info.uncompressed_size + 1);
+			if (!metafile) {
+				demo_close_archive(devc);
+				devc->sample_generator = DEMO_GEN_RANDOM;
+				goto set_defaults;
+			}
+			unzOpenCurrentFile(devc->archive);
+			unzReadCurrentFile(devc->archive, metafile,
+				info.uncompressed_size);
+			metafile[info.uncompressed_size] = '\0';
+			unzCloseCurrentFile(devc->archive);
+		}
+
+		/* Parse the header INI. probeN keys are skipped — the new
+		 * design does not rebuild channels on file load. */
+		kf = g_key_file_new();
+		if (g_key_file_load_from_data(kf, metafile, strlen(metafile),
+				G_KEY_FILE_NONE, NULL)) {
+			sections = g_key_file_get_groups(kf, &ngroups);
+			for (i = 0; i < ngroups; i++) {
+				keys = g_key_file_get_keys(kf, sections[i], &nkeys, NULL);
+				for (j = 0; j < nkeys; j++) {
+					val = g_key_file_get_value(kf, sections[i],
+						keys[j], NULL);
+					if (!val)
+						continue;
+					if (!strcmp(keys[j], "samplerate")) {
+						devc->cur_samplerate =
+							g_ascii_strtoull(val, NULL, 10);
+					} else if (!strcmp(keys[j], "total samples")) {
+						devc->total_samples =
+							g_ascii_strtoull(val, NULL, 10);
+						devc->limit_samples = devc->total_samples;
+					} else if (!strcmp(keys[j], "total blocks")) {
+						devc->num_blocks = (int)g_ascii_strtoull(
+							val, NULL, 10);
+					} else if (!strcmp(keys[j], "total probes")) {
+						devc->num_probes = (int)g_ascii_strtoull(
+							val, NULL, 10);
+					}
+					/* probe0/probe1/... channel-name keys
+					 * intentionally ignored. */
+					g_free(val);
+					val = NULL;
+				}
+				g_strfreev(keys);
+				keys = NULL;
+			}
+			g_strfreev(sections);
+			sections = NULL;
+		} else {
+			sr_warn("demo: failed to parse header INI, "
+				"using parsed values where available.");
+		}
+		g_key_file_free(kf);
+		g_free(metafile);
+	}
+
+set_defaults:
+	/* RANDOM fallback (or explicit random mode): set mode-specific
+	 * defaults so the math generators have a sensible capture depth. */
+	if (devc->sample_generator == DEMO_GEN_RANDOM) {
+		switch (devc->device_mode) {
+		case DEMO_MODE_LOGIC:
+			devc->cur_samplerate = SR_MHZ(1);
+			devc->total_samples = SR_MHZ(1);
+			devc->limit_samples = devc->total_samples;
+			devc->num_blocks = 0;
+			break;
+		case DEMO_MODE_DSO:
+			devc->cur_samplerate = SR_MHZ(100);
+			devc->total_samples = SR_KHZ(10);
+			devc->limit_samples = devc->total_samples;
+			devc->num_blocks = 1;
+			break;
+		case DEMO_MODE_ANALOG:
+			devc->cur_samplerate = SR_KHZ(200);
+			devc->total_samples = SR_KHZ(10);
+			devc->limit_samples = devc->total_samples;
+			devc->num_blocks = 1;
+			break;
+		default:
+			break;
+		}
+	}
+	devc->load_data = TRUE;
+	return SR_OK;
+}
+
+/* DSO measurement calculation (ported from old fork dso_status_update).
+ * Walks the interleaved [ch0,ch1,...] DSO buffer and computes per-channel
+ * max/min/high_level/low_level/cycle stats/accumulated mean/square into
+ * devc->mstatus. ch0 and ch1 share the same values (the old fork's
+ * behavior). Called after each SR_DF_DSO packet by demo_send_dso_packet
+ * and demo_receive_data_dso_file. */
+SR_PRIV void demo_dso_status_update(struct dev_context *devc,
+	const uint8_t *buf, uint32_t len)
+{
+	struct demo_dso_measure *st;
+	uint8_t ch_max = DSO_MID_VAL;
+	uint8_t ch_min = DSO_MID_VAL;
+	uint8_t val;
+	uint32_t i;
+	uint64_t total_val = 0;
+	gboolean first_plevel = FALSE;
+	gboolean temp_plevel = FALSE;
+	uint32_t temp_llen = 0;
+
+	if (!devc || !buf || len == 0)
+		return;
+	st = &devc->mstatus;
+
+	/* Step 1: find max/min over ch0 samples (every other byte). */
+	for (i = 0; i < len; i += 2) {
+		val = buf[i];
+		if (val > ch_max)
+			ch_max = val;
+		if (val < ch_min)
+			ch_min = val;
+	}
+	st->ch0_max = st->ch1_max = ch_max;
+	st->ch0_min = st->ch1_min = ch_min;
+	st->ch0_high_level = st->ch1_high_level = ch_max;
+	st->ch0_low_level = st->ch1_low_level = ch_min;
+
+	/* Step 2: clear cycle stats. */
+	st->ch0_cyc_tlen = st->ch1_cyc_tlen = 0;
+	st->ch0_cyc_llen = st->ch1_cyc_llen = 0;
+	st->ch0_cyc_cnt = st->ch1_cyc_cnt = 0;
+	st->ch0_cyc_rlen = st->ch1_cyc_rlen = 0;
+	st->ch0_cyc_flen = st->ch1_cyc_flen = 0;
+	st->ch0_cyc_plen = st->ch1_cyc_plen = 0;
+	st->ch0_level_valid = st->ch1_level_valid = TRUE;
+	st->ch0_acc_mean = st->ch1_acc_mean = 0;
+
+	/* Step 3: scan for cycle stats. ch0 and ch1 share the same values
+	 * (mirrors old fork behavior where both channels are updated in lockstep). */
+	for (i = 0; i < len; i += 2) {
+		val = buf[i];
+		if (first_plevel) {
+			if (val <= DSO_MID_VAL) {
+				st->ch0_cyc_plen++;
+				st->ch1_cyc_plen++;
+			}
+			temp_llen++;
+			if (temp_plevel) {
+				/* currently high — count rising edge */
+				st->ch0_cyc_rlen++;
+				st->ch1_cyc_rlen++;
+				if (val == ch_max) {
+					temp_plevel = !temp_plevel;
+					if (st->ch0_plevel == temp_plevel) {
+						st->ch0_cyc_cnt++;
+						st->ch1_cyc_cnt++;
+						st->ch0_cyc_tlen += temp_llen;
+						st->ch1_cyc_tlen += temp_llen;
+						st->ch0_cyc_llen = st->ch1_cyc_llen = 0;
+						temp_llen = 0;
+					} else {
+						st->ch0_cyc_llen = st->ch1_cyc_llen = temp_llen;
+					}
+				}
+			} else {
+				/* currently low — count falling edge */
+				st->ch0_cyc_flen++;
+				st->ch1_cyc_flen++;
+				if (val == ch_min) {
+					temp_plevel = !temp_plevel;
+					if (st->ch0_plevel == temp_plevel) {
+						st->ch0_cyc_cnt++;
+						st->ch1_cyc_cnt++;
+						st->ch0_cyc_tlen += temp_llen;
+						st->ch1_cyc_tlen += temp_llen;
+						st->ch0_cyc_llen = st->ch1_cyc_llen = 0;
+						temp_llen = 0;
+					} else {
+						st->ch0_cyc_llen = st->ch1_cyc_llen = temp_llen;
+					}
+				}
+			}
+		} else {
+			/* Find first extremum to seed plevel. */
+			if (val == ch_max || val == ch_min) {
+				if (val == ch_max) {
+					temp_plevel = FALSE;
+					st->ch0_plevel = st->ch1_plevel = FALSE;
+				} else {
+					temp_plevel = TRUE;
+					st->ch0_plevel = st->ch1_plevel = TRUE;
+				}
+				first_plevel = TRUE;
+			}
+		}
+		total_val += val;
+	}
+
+	/* Step 4: rlen/flen halve (each cycle counted twice: rising+falling). */
+	st->ch0_cyc_rlen /= 2;
+	st->ch1_cyc_rlen = st->ch0_cyc_rlen;
+	st->ch0_cyc_flen /= 2;
+	st->ch1_cyc_flen = st->ch0_cyc_flen;
+
+	/* Step 5: acc_mean / acc_square. For non-RANDOM mode the waveform is
+	 * a uniform mid value, so acc_mean = mid * num_ch0_samples. For
+	 * RANDOM mode, acc_mean = sum of all ch0 samples. acc_square is a
+	 * rough estimate (ch_max * num_samples * 7) matching old fork. */
+	if (devc->sample_generator != DEMO_GEN_RANDOM) {
+		st->ch0_acc_mean = st->ch1_acc_mean =
+			(uint32_t)(DSO_MID_VAL * (uint64_t)(len / 2));
+	} else {
+		st->ch0_acc_mean = st->ch1_acc_mean = (uint32_t)total_val;
+	}
+	st->ch0_acc_square = st->ch1_acc_square =
+		(uint64_t)ch_max * (uint64_t)(len / 2) * 7;
+	st->measure_valid = TRUE;
+}
+
+/* DSO per-channel vdiv scaling (ported from old fork receive_data_dso).
+ * Walks the interleaved [ch0,ch1,...] DSO buffer and applies per-channel
+ * linear compression (vdiv > 200mV) or expansion-with-clamp (vdiv <= 200mV)
+ * using devc->dso_vdiv[] and devc->dso_offset[]. Called by
+ * demo_send_dso_packet before sending the SR_DF_DSO packet, and by
+ * demo_receive_data_dso_file after loading file data. */
+SR_PRIV void demo_dso_vdiv_scale(struct dev_context *devc,
+	uint8_t *buf, uint32_t len)
+{
+	uint32_t i;
+	int ch_idx;
+
+	if (!devc || !buf || len == 0)
+		return;
+
+	for (i = 0; i < len; i++) {
+		uint64_t vdiv;
+		uint8_t temp_val = buf[i];
+		uint16_t val, tem;
+
+		ch_idx = (int)(i % 2);  /* 0=ch0, 1=ch1 */
+		vdiv = devc->dso_vdiv[ch_idx];
+
+		if (vdiv > SR_mV(200)) {
+			/* Normal range: linear compress around mid. */
+			if (temp_val > DSO_MID_VAL) {
+				val = (uint8_t)(temp_val - DSO_MID_VAL);
+				tem = (uint16_t)((uint16_t)val *
+					(uint16_t)DSO_DEFAULT_VDIV / (uint16_t)vdiv);
+				temp_val = (uint8_t)(DSO_MID_VAL + tem);
+			} else if (temp_val < DSO_MID_VAL) {
+				val = (uint8_t)(DSO_MID_VAL - temp_val);
+				tem = (uint16_t)((uint16_t)val *
+					(uint16_t)DSO_DEFAULT_VDIV / (uint16_t)vdiv);
+				temp_val = (uint8_t)(DSO_MID_VAL - tem);
+			}
+			buf[i] = temp_val;
+		} else {
+			/* High sensitivity range: expand to 16-bit then clamp
+			 * into the [DSO_MAX_VAL, DSO_MIN_VAL] window around
+			 * (expand_mid - offset). */
+			uint16_t high_gate, low_gate;
+			uint16_t expand_mid;
+			uint16_t expand_scale;
+			/* (SR_mV(200) / vdiv) * 256 — old fork's
+			 * DSO_EXPAND_MID_VAL() macro expands the 8-bit value into
+			 * the 16-bit space centered on this point. */
+			expand_scale = (uint16_t)(SR_mV(200) / vdiv);
+			expand_mid = (uint16_t)(expand_scale * 256);
+			if (temp_val > DSO_MID_VAL) {
+				val = (uint8_t)(temp_val - DSO_MID_VAL);
+				tem = (uint16_t)((uint16_t)val *
+					(uint16_t)DSO_DEFAULT_VDIV / (uint16_t)vdiv);
+				tem = (uint16_t)(expand_mid + tem);
+			} else if (temp_val < DSO_MID_VAL) {
+				val = (uint8_t)(DSO_MID_VAL - temp_val);
+				tem = (uint16_t)((uint16_t)val *
+					(uint16_t)DSO_DEFAULT_VDIV / (uint16_t)vdiv);
+				tem = (uint16_t)(expand_mid - tem);
+			} else {
+				tem = expand_mid;
+			}
+			high_gate = (uint16_t)(expand_mid - devc->dso_offset[ch_idx]);
+			low_gate = (uint16_t)(high_gate + DSO_LIMIT);
+			if (tem <= high_gate)
+				tem = DSO_MAX_VAL;
+			else if (tem >= low_gate)
+				tem = DSO_MIN_VAL;
+			else
+				tem = (uint16_t)(tem - high_gate);
+			buf[i] = (uint8_t)tem;
+		}
+	}
+}
+
+/* ANALOG per-channel vdiv scaling (ported from old fork receive_data_analog).
+ * Applies linear compression around ANALOG_MID_VAL using
+ * devc->analog_vdiv[ch_idx]. Called by send_analog_packet (math mode) and
+ * demo_receive_data_analog_file (file mode) before sending SR_DF_ANALOG. */
+SR_PRIV void demo_analog_vdiv_scale(struct dev_context *devc,
+	uint8_t *buf, uint32_t len, int ch_idx)
+{
+	uint32_t i;
+	uint64_t vdiv;
+
+	if (!devc || !buf || len == 0 || ch_idx < 0 || ch_idx >= DSO_MAX_CHANNELS)
+		return;
+
+	vdiv = devc->analog_vdiv[ch_idx];
+	if (vdiv == 0)
+		return;
+
+	for (i = 0; i < len; i++) {
+		uint8_t temp_value = buf[i];
+		uint8_t val;
+		uint16_t tem;
+
+		if (temp_value > ANALOG_MID_VAL) {
+			val = (uint8_t)(temp_value - ANALOG_MID_VAL);
+			tem = (uint16_t)((uint16_t)val *
+				(uint16_t)ANALOG_DEFAULT_VDIV / (uint16_t)vdiv);
+			if (tem >= ANALOG_MID_VAL)
+				temp_value = ANALOG_MIN_VAL;
+			else
+				temp_value = (uint8_t)(ANALOG_MID_VAL + tem);
+		} else if (temp_value < ANALOG_MID_VAL) {
+			val = (uint8_t)(ANALOG_MID_VAL - temp_value);
+			tem = (uint16_t)((uint16_t)val *
+				(uint16_t)ANALOG_DEFAULT_VDIV / (uint16_t)vdiv);
+			if (tem >= ANALOG_MID_VAL)
+				temp_value = ANALOG_MAX_VAL;
+			else
+				temp_value = (uint8_t)(ANALOG_MID_VAL - tem);
+		}
+		buf[i] = temp_value;
+	}
+}
+
+/* =====================================================================
+ * .demo zip data replay callbacks.
+ * Each function reads per-channel block data from the open zip archive
+ * (devc->archive), byte-interleaves it into devc->packet_buffer->post_buf,
+ * and sends a SR_DF_LOGIC / SR_DF_DSO / SR_DF_ANALOG packet. Called from
+ * demo_prepare_data when sample_generator != DEMO_GEN_RANDOM && archive.
+ * Returns G_SOURCE_CONTINUE to keep the timer alive, or stops the
+ * acquisition (sr_dev_acquisition_stop) when all blocks have been read.
+ * ===================================================================== */
+
+/* Count enabled channels of the given type and fill ch_list[] with pointers
+ * to them in sdi->channels order. Returns the count (0..max). */
+static int demo_collect_enabled_channels(const struct sr_dev_inst *sdi,
+	int channel_type, struct sr_channel **ch_list, int max)
+{
+	struct sr_channel *ch;
+	GSList *l;
+	int n = 0;
+
+	for (l = sdi->channels; l && n < max; l = l->next) {
+		ch = l->data;
+		if (ch && ch->type == channel_type && ch->enabled)
+			ch_list[n++] = ch;
+	}
+	return n;
+}
+
+/* Ensure devc->packet_buffer exists and its post_buf is sized for
+ * post_buf_len bytes. Allocates / reallocates as needed. Returns NULL on
+ * allocation failure. */
+static struct demo_packet_buffer *demo_ensure_packet_buffer(
+	struct dev_context *devc, uint64_t post_buf_len)
+{
+	struct demo_packet_buffer *pb;
+	int i;
+
+	if (!devc->packet_buffer) {
+		devc->packet_buffer = g_new0(struct demo_packet_buffer, 1);
+		if (!devc->packet_buffer)
+			return NULL;
+	}
+	pb = devc->packet_buffer;
+	if (pb->post_buf_len != post_buf_len) {
+		g_free(pb->post_buf);
+		pb->post_buf = g_malloc(post_buf_len);
+		if (!pb->post_buf) {
+			pb->post_buf_len = 0;
+			return NULL;
+		}
+		pb->post_buf_len = post_buf_len;
+		pb->post_len = 0;
+		for (i = 0; i < MAX_PROBE_NUM; i++) {
+			g_free(pb->block_bufs[i]);
+			pb->block_bufs[i] = NULL;
+			pb->block_read_positions[i] = 0;
+		}
+		pb->block_data_len = 0;
+		pb->block_chan_read_pos = 0;
+	}
+	return pb;
+}
+
+/* Read one per-channel block (file "L-<ch>/<block>") from the zip into
+ * pb->block_bufs[ch]. Allocates block_bufs as needed. Returns SR_OK or
+ * SR_ERR on zip failure. */
+static int demo_read_logic_block(struct dev_context *devc,
+	struct demo_packet_buffer *pb, int chan_num, int block_idx)
+{
+	char file_name[32];
+	unz_file_info64 info;
+	int ch_index, malloc_idx;
+	int ret;
+
+	for (ch_index = 0; ch_index < chan_num; ch_index++) {
+		snprintf(file_name, sizeof(file_name), "L-%d/%d",
+			ch_index, block_idx);
+		if (unzLocateFile(devc->archive, file_name, 0) != UNZ_OK) {
+			sr_err("demo: can't locate zip entry '%s'.", file_name);
+			return SR_ERR;
+		}
+		if (unzGetCurrentFileInfo64(devc->archive, &info,
+				NULL, 0, NULL, 0, NULL, 0) != UNZ_OK) {
+			sr_err("demo: unzGetCurrentFileInfo64 failed for '%s'.",
+				file_name);
+			return SR_ERR;
+		}
+		if (ch_index == 0) {
+			/* First channel sets the block size; allocate all
+			 * channel block_bufs to that size. */
+			if (info.uncompressed_size > pb->block_data_len) {
+				for (malloc_idx = 0; malloc_idx < chan_num; malloc_idx++) {
+					g_free(pb->block_bufs[malloc_idx]);
+					pb->block_bufs[malloc_idx] =
+						g_malloc(info.uncompressed_size + 1);
+					if (!pb->block_bufs[malloc_idx])
+						return SR_ERR_MALLOC;
+				}
+				pb->block_data_len = info.uncompressed_size;
+			}
+		} else if (info.uncompressed_size != pb->block_data_len) {
+			sr_err("demo: block size mismatch for '%s'.", file_name);
+			return SR_ERR;
+		}
+		if (unzOpenCurrentFile(devc->archive) != UNZ_OK) {
+			sr_err("demo: can't open zip entry '%s'.", file_name);
+			return SR_ERR;
+		}
+		ret = unzReadCurrentFile(devc->archive,
+			pb->block_bufs[ch_index], pb->block_data_len);
+		unzCloseCurrentFile(devc->archive);
+		if (ret < 0) {
+			sr_err("demo: read error for '%s'.", file_name);
+			return SR_ERR;
+		}
+		pb->block_read_positions[ch_index] = 0;
+	}
+	pb->block_chan_read_pos = 0;
+	return SR_OK;
+}
+
+/* LOGIC file replay: reads L-<ch>/<block> from zip, byte-interleaves 8
+ * bytes per channel per unit into post_buf (LA_CROSS_DATA format), sends
+ * SR_DF_LOGIC. Stops acquisition when all blocks are consumed. */
+SR_PRIV int demo_receive_data_logic_decoder(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_logic logic;
+	struct sr_channel *ch_list[MAX_PROBE_NUM];
+	struct demo_packet_buffer *pb;
+	int chan_num;
+	const uint8_t byte_align = 8;  /* LOGIC: 8 bytes per channel per unit */
+	uint64_t post_buf_len;
+	int read_chan_idx, ret;
+
+	chan_num = demo_collect_enabled_channels(sdi, SR_CHANNEL_LOGIC,
+		ch_list, MAX_PROBE_NUM);
+	if (chan_num < 1) {
+		sr_err("demo: no enabled logic channels for file replay.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	/* post_buf holds byte_align bytes per channel per interleave unit.
+	 * Use a chunk of ~4KB worth of units (512 units per channel). */
+	post_buf_len = (uint64_t)byte_align * chan_num * 64;
+	pb = demo_ensure_packet_buffer(devc, post_buf_len);
+	if (!pb) {
+		sr_err("demo: packet buffer alloc failed.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	/* If the current block has been fully interleaved, advance to the
+	 * next block (or stop if all blocks are done). */
+	if (pb->block_chan_read_pos >= pb->block_data_len) {
+		if (devc->cur_block >= devc->num_blocks) {
+			/* All blocks read — end of stream. */
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		ret = demo_read_logic_block(devc, pb, chan_num, devc->cur_block);
+		if (ret != SR_OK) {
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		devc->cur_block++;
+	}
+
+	/* Byte-interleave one chunk: byte_align bytes from each channel in
+	 * turn, until post_buf is full or the block is exhausted. */
+	pb->post_len = 0;
+	read_chan_idx = 0;
+	while (pb->post_len + byte_align <= pb->post_buf_len &&
+	       pb->block_chan_read_pos + byte_align <= pb->block_data_len) {
+		uint8_t *dst = (uint8_t *)pb->post_buf + pb->post_len;
+		uint8_t *src = (uint8_t *)pb->block_bufs[read_chan_idx] +
+			pb->block_read_positions[read_chan_idx];
+		memcpy(dst, src, byte_align);
+		pb->post_len += byte_align;
+		pb->block_read_positions[read_chan_idx] += byte_align;
+		read_chan_idx++;
+		if (read_chan_idx == chan_num) {
+			read_chan_idx = 0;
+			pb->block_chan_read_pos += byte_align;
+		}
+	}
+
+	if (pb->post_len >= (uint64_t)byte_align * chan_num) {
+		packet.type = SR_DF_LOGIC;
+		packet.payload = &logic;
+		logic.unitsize = 0;  /* unused for LA_CROSS_DATA */
+		logic.format = LA_CROSS_DATA;
+		logic.length = pb->post_len;
+		logic.data = pb->post_buf;
+		sr_session_send(sdi, &packet);
+	}
+
+	return G_SOURCE_CONTINUE;
+}
+
+/* DSO file replay: reads O-<ch>/0 from zip into post_buf (byte-interleaved
+ * [ch0,ch1,...]), applies per-channel vdiv scaling, sends SR_DF_DSO, and
+ * updates measurement stats. The data is read once (single block) and
+ * re-sent each tick until limit_samples is reached. */
+SR_PRIV int demo_receive_data_dso_file(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_dso dso;
+	struct sr_channel *ch_list[MAX_PROBE_NUM];
+	struct demo_packet_buffer *pb;
+	char file_name[32];
+	unz_file_info64 info;
+	int chan_num, ch_index, ret;
+	uint64_t post_buf_len;
+
+	chan_num = demo_collect_enabled_channels(sdi, SR_CHANNEL_DSO,
+		ch_list, MAX_PROBE_NUM);
+	if (chan_num < 1) {
+		sr_err("demo: no enabled DSO channels for file replay.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	post_buf_len = DSO_PACKET_LEN;
+	pb = demo_ensure_packet_buffer(devc, post_buf_len);
+	if (!pb) {
+		sr_err("demo: packet buffer alloc failed.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	/* Load the DSO data from the zip on first call (load_data==TRUE).
+	 * DSO .demo files contain a single block per channel (O-<ch>/0). */
+	if (devc->load_data) {
+		for (ch_index = 0; ch_index < chan_num; ch_index++) {
+			snprintf(file_name, sizeof(file_name), "O-%d/0", ch_index);
+			if (unzLocateFile(devc->archive, file_name, 0) != UNZ_OK) {
+				sr_err("demo: can't locate zip entry '%s'.", file_name);
+				sr_dev_acquisition_stop(sdi);
+				return G_SOURCE_CONTINUE;
+			}
+			if (unzGetCurrentFileInfo64(devc->archive, &info,
+					NULL, 0, NULL, 0, NULL, 0) != UNZ_OK) {
+				sr_err("demo: unzGetCurrentFileInfo64 failed.");
+				sr_dev_acquisition_stop(sdi);
+				return G_SOURCE_CONTINUE;
+			}
+			if (ch_index == 0) {
+				if (info.uncompressed_size * chan_num > pb->post_buf_len) {
+					/* Resize post_buf to fit all channels' data. */
+					g_free(pb->post_buf);
+					pb->post_buf = g_malloc(info.uncompressed_size * chan_num);
+					if (!pb->post_buf) {
+						pb->post_buf_len = 0;
+						sr_dev_acquisition_stop(sdi);
+						return G_SOURCE_CONTINUE;
+					}
+					pb->post_buf_len = info.uncompressed_size * chan_num;
+				}
+				pb->block_data_len = info.uncompressed_size;
+			} else if (info.uncompressed_size != pb->block_data_len) {
+				sr_err("demo: DSO block size mismatch for '%s'.", file_name);
+				sr_dev_acquisition_stop(sdi);
+				return G_SOURCE_CONTINUE;
+			}
+			if (unzOpenCurrentFile(devc->archive) != UNZ_OK) {
+				sr_err("demo: can't open zip entry '%s'.", file_name);
+				sr_dev_acquisition_stop(sdi);
+				return G_SOURCE_CONTINUE;
+			}
+			/* Read into post_buf at offset ch_index (byte-interleaved:
+			 * [ch0_s0, ch1_s0, ch0_s1, ch1_s1, ...]). We read the whole
+			 * channel block contiguously first, then de-interleave below. */
+			{
+				uint8_t *tmp = g_malloc(pb->block_data_len);
+				if (!tmp) {
+					unzCloseCurrentFile(devc->archive);
+					sr_dev_acquisition_stop(sdi);
+					return G_SOURCE_CONTINUE;
+				}
+				unzReadCurrentFile(devc->archive, tmp, pb->block_data_len);
+				unzCloseCurrentFile(devc->archive);
+				/* Scatter into interleaved post_buf: sample i goes to
+				 * position i*chan_num + ch_index. */
+				for (uint64_t i = 0; i < pb->block_data_len; i++) {
+					((uint8_t *)pb->post_buf)[i * chan_num + ch_index] = tmp[i];
+				}
+				g_free(tmp);
+			}
+		}
+		pb->post_len = pb->block_data_len * chan_num;
+		/* Apply per-channel vdiv scaling once on load. Subsequent ticks
+		 * re-send the already-scaled data. If vdiv/offset change mid-
+		 * stream the user must restart acquisition to re-scale. */
+		demo_dso_vdiv_scale(devc, (uint8_t *)pb->post_buf, pb->post_len);
+		devc->load_data = FALSE;
+	}
+
+	/* Build and send the DSO packet. */
+	dso.data = pb->post_buf;
+	dso.num_samples = pb->post_len / chan_num;
+	dso.trig_flag = 1;
+	dso.trig_ch = 0;
+	dso.en_ch_num = (uint8_t)chan_num;
+	dso.sample_bits = devc->dso_unit_bits;
+	dso.trig_offset = (int16_t)(dso.num_samples / 2);
+	dso.packet_len = (uint32_t)pb->post_len;
+	dso.samplerate_tog = (uint32_t)devc->cur_samplerate;
+
+	packet.type = SR_DF_DSO;
+	packet.payload = &dso;
+	sr_session_send(sdi, &packet);
+
+	/* Update measurement stats. */
+	demo_dso_status_update(devc, (uint8_t *)pb->post_buf, pb->post_len);
+
+	/* Single-shot: stop after one frame. Loop/instant handled by caller. */
+	if (!devc->instant && !devc->loop_mode)
+		sr_dev_acquisition_stop(sdi);
+
+	return G_SOURCE_CONTINUE;
+}
+
+/* ANALOG file replay: reads A-0/0 from zip into data_buf (with vdiv scaling
+ * applied per-channel), then sends a chunk cyclically each tick as
+ * SR_DF_ANALOG. Stops acquisition when limit_samples is reached. */
+SR_PRIV int demo_receive_data_analog_file(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc = sdi->priv;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_analog analog;
+	struct sr_analog_encoding encoding;
+	struct sr_analog_meaning meaning;
+	struct sr_analog_spec spec;
+	struct sr_channel *ch_list[MAX_PROBE_NUM];
+	struct demo_packet_buffer *pb;
+	char file_name[32];
+	unz_file_info64 info;
+	int chan_num, ret;
+	uint64_t chunk_len, back_len, front_len;
+
+	chan_num = demo_collect_enabled_channels(sdi, SR_CHANNEL_ANALOG,
+		ch_list, MAX_PROBE_NUM);
+	if (chan_num < 1) {
+		sr_err("demo: no enabled analog channels for file replay.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	/* Load A-0/0 from zip on first call. Expand the cyclic byte pattern
+	 * to total_samples length (per-channel), apply per-channel vdiv
+	 * scaling, store in devc->data_buf. */
+	if (devc->load_data) {
+		uint8_t *cycle_data;
+		uint64_t total_buf_len;
+		uint64_t per_block_after_expand;
+		uint64_t cur_l;
+		int ch_idx;
+
+		snprintf(file_name, sizeof(file_name), "A-0/0");
+		if (unzLocateFile(devc->archive, file_name, 0) != UNZ_OK) {
+			sr_err("demo: can't locate zip entry '%s'.", file_name);
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		if (unzGetCurrentFileInfo64(devc->archive, &info,
+				NULL, 0, NULL, 0, NULL, 0) != UNZ_OK) {
+			sr_err("demo: unzGetCurrentFileInfo64 failed.");
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		cycle_data = g_malloc(ANALOG_DATA_LEN_PER_CYCLE);
+		if (!cycle_data) {
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		if (unzOpenCurrentFile(devc->archive) != UNZ_OK) {
+			g_free(cycle_data);
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		ret = unzReadCurrentFile(devc->archive, cycle_data,
+			ANALOG_DATA_LEN_PER_CYCLE);
+		unzCloseCurrentFile(devc->archive);
+		if (ret < 0) {
+			g_free(cycle_data);
+			sr_err("demo: read error for A-0/0.");
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+
+		/* Expand: each cycle byte is repeated per_block_after_expand
+		 * times, interleaved per channel. Mirrors old fork. */
+		total_buf_len = (uint64_t)(ANALOG_CYCLE_RATIO *
+			(double)devc->total_samples * chan_num);
+		if (total_buf_len % ANALOG_DATA_LEN_PER_CYCLE != 0)
+			total_buf_len = total_buf_len / ANALOG_DATA_LEN_PER_CYCLE
+				* ANALOG_DATA_LEN_PER_CYCLE;
+		g_free(devc->data_buf);
+		devc->data_buf = g_malloc0(total_buf_len);
+		if (!devc->data_buf) {
+			g_free(cycle_data);
+			sr_dev_acquisition_stop(sdi);
+			return G_SOURCE_CONTINUE;
+		}
+		devc->data_buf_len = total_buf_len;
+		per_block_after_expand = total_buf_len / ANALOG_DATA_LEN_PER_CYCLE;
+
+		/* Apply per-channel vdiv scaling on the cycle bytes and expand
+		 * into data_buf with proper channel interleaving. */
+		for (uint64_t i = 0; i < ANALOG_DATA_LEN_PER_CYCLE; i++) {
+			uint8_t scaled = cycle_data[i];
+			ch_idx = (int)(i % chan_num);
+			demo_analog_vdiv_scale(devc, &scaled, 1, ch_idx);
+			for (uint64_t j = 0; j < per_block_after_expand; j++) {
+				if (i % chan_num == 0)
+					cur_l = i * per_block_after_expand + j * chan_num;
+				else
+					cur_l = (i % chan_num) +
+						(i / chan_num) * chan_num * per_block_after_expand +
+						j * chan_num;
+				if (cur_l < total_buf_len)
+					((uint8_t *)devc->data_buf)[cur_l] = scaled;
+			}
+		}
+		g_free(cycle_data);
+		devc->load_data = FALSE;
+		devc->packet_buffer = NULL;  /* will be allocated below */
+	}
+
+	/* Send a chunk cyclically from data_buf. */
+	chunk_len = MIN(ANALOG_BUFSIZE, devc->data_buf_len);
+	pb = demo_ensure_packet_buffer(devc, chunk_len);
+	if (!pb) {
+		sr_err("demo: analog packet buffer alloc failed.");
+		sr_dev_acquisition_stop(sdi);
+		return G_SOURCE_CONTINUE;
+	}
+
+	/* Track read position in pb->block_chan_read_pos (reused for analog). */
+	if (pb->block_chan_read_pos + chunk_len >= devc->data_buf_len) {
+		back_len = devc->data_buf_len - pb->block_chan_read_pos;
+		front_len = chunk_len - back_len;
+		memcpy(pb->post_buf,
+			(uint8_t *)devc->data_buf + pb->block_chan_read_pos, back_len);
+		memcpy((uint8_t *)pb->post_buf + back_len,
+			devc->data_buf, front_len);
+		pb->block_chan_read_pos = front_len;
+	} else {
+		memcpy(pb->post_buf,
+			(uint8_t *)devc->data_buf + pb->block_chan_read_pos,
+			chunk_len);
+		pb->block_chan_read_pos += chunk_len;
+	}
+
+	/* Send SR_DF_ANALOG with byte encoding (uint8_t samples). */
+	sr_analog_init(&analog, &encoding, &meaning, &spec, 0);
+	encoding.unitsize = 1;
+	encoding.is_signed = FALSE;
+	encoding.is_float = FALSE;
+	meaning.mq = SR_MQ_VOLTAGE;
+	meaning.unit = SR_UNIT_VOLT;
+	meaning.mqflags = SR_MQFLAG_AC;
+	meaning.channels = NULL;
+	for (int i = 0; i < chan_num; i++)
+		meaning.channels = g_slist_append(meaning.channels, ch_list[i]);
+	analog.data = pb->post_buf;
+	analog.num_samples = chunk_len / chan_num;
+
+	packet.type = SR_DF_ANALOG;
+	packet.payload = &analog;
+	sr_session_send(sdi, &packet);
+
+	g_slist_free(meaning.channels);
+
+	/* Stop when limit_samples is reached. */
+	devc->sent_samples += chunk_len / chan_num;
+	if (devc->limit_samples > 0 &&
+	    devc->sent_samples >= devc->limit_samples) {
+		sr_dev_acquisition_stop(sdi);
+	}
+
+	return G_SOURCE_CONTINUE;
+}
+

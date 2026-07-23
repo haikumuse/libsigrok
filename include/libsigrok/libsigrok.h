@@ -165,6 +165,14 @@ enum sr_datatype {
 	SR_T_INT32,
 	SR_T_MQ,
 	SR_T_UINT32,
+	/* DSL Driver Extension types — required by dreamsourcelab-dslogic driver
+	 * config_info entries. Values match PXView fork libsigrok extensions
+	 * (dsvdef.h historical stubs) so existing PXView code keeps working. */
+	SR_T_UINT8 = 10012,
+	SR_T_INT16,
+	SR_T_CHAR,
+	SR_T_LIST,
+	SR_T_UINT16,
 
 	/* Update sr_variant_type_get() (hwdriver.c) upon changes! */
 };
@@ -1412,6 +1420,75 @@ enum sr_configkey {
 	                               * Used by SamplingBar::commit_hori_res() to
 	                               * clamp the timebase-derived sample rate.
 	                               * Ported from libsigrok4DSL (was 30073). */
+
+	/*--- DSL Driver Extension Keys ------------------------------------*/
+	/*
+	 * Fork-only config keys required by the dreamsourcelab-dslogic driver
+	 * (LOGIC/ANALOG/DSO modes), ported from the PXView fork libsigrok.
+	 *
+	 * Values use 60049/60050/60056/60058 (preserved from dsvdef.h historical
+	 * stubs — PXView code already references these) and 60064-60091 for the
+	 * newly-ported keys. The 60064+ range avoids conflict with:
+	 *   - PXLogic extension keys (60001-60014, 60020-60033)
+	 *   - DSO per-channel keys (60035-60047, 60059-60063)
+	 *   - upstream 30000-range keys (SR_CONF_VDIV=30012, SR_CONF_NUM_HDIV=30016,
+	 *     SR_CONF_SAMPLE_INTERVAL=30015) which the fork had previously reused
+	 *     with different semantics (TRIGGER_CHANNEL/HOLDOFF/MARGIN) — those
+	 *     fork keys are reassigned here to 60078/60079/60080 to avoid the
+	 *     upstream collision.
+	 */
+
+	/* Probe enable (per-channel). Historical stub value preserved. */
+	SR_CONF_PROBE_EN = 60049,
+	/* Wait for firmware upload to complete. Historical stub value preserved. */
+	SR_CONF_WAIT_UPLOAD = 60050,
+	/* Actual sample count (post-alignment). Historical stub value preserved. */
+	SR_CONF_ACTUAL_SAMPLES = 60056,
+	/* Session file version. Historical stub value preserved. */
+	SR_CONF_FILE_VERSION = 60058,
+
+	/* Total channel count (was fork 30026; reassigned to avoid 60062
+	 * collision with SR_CONF_PROBE_CONFIGS). */
+	SR_CONF_TOTAL_CH_NUM = 60064,
+	SR_CONF_RLE_SUPPORT,                 /* 60065 — RLE support flag */
+	SR_CONF_DSO_SYNC,                    /* 60066 — DSO sync */
+	SR_CONF_LA_CH32,                     /* 60067 — 32-channel LA support */
+	SR_CONF_HAVE_ZERO,                   /* 60068 — zero calibration ability */
+	SR_CONF_ZERO,                        /* 60069 — zero calibration state */
+	SR_CONF_ZERO_SET,                    /* 60070 — set zero calibration */
+	SR_CONF_ZERO_LOAD,                   /* 60071 — load zero calibration */
+	SR_CONF_ZERO_DEFAULT,                /* 60072 — default zero calibration */
+	SR_CONF_ZERO_COMB,                   /* 60073 — zero comb */
+	SR_CONF_ZERO_COMB_FGAIN,             /* 60074 — zero comb fgain */
+	SR_CONF_VOCM,                        /* 60075 — VOCM */
+	SR_CONF_CALI,                        /* 60076 — calibration */
+	SR_CONF_MAX_DSO_SAMPLELIMITS,         /* 60077 — max DSO sample limits */
+	/* Trigger channel (was fork 30012 — collides with upstream
+	 * SR_CONF_VDIV=30012; reassigned to 60078). */
+	SR_CONF_TRIGGER_CHANNEL,
+	/* Trigger holdoff (was fork 30015 — collides with upstream
+	 * SR_CONF_SAMPLE_INTERVAL=30015; reassigned to 60079). */
+	SR_CONF_TRIGGER_HOLDOFF,
+	/* Trigger margin (was fork 30016 — collides with upstream
+	 * SR_CONF_NUM_HDIV=30016; reassigned to 60080). */
+	SR_CONF_TRIGGER_MARGIN,
+	SR_CONF_CLOCK_TYPE,                  /* 60081 — clock type */
+	SR_CONF_BANDWIDTH_LIMIT,             /* 60082 — bandwidth limit */
+	SR_CONF_BANDWIDTH,                   /* 60083 — bandwidth */
+	SR_CONF_PROBE_PREOFF,                /* 60084 — probe pre-offset */
+	SR_CONF_PROBE_PREOFF_DEFAULT,        /* 60085 — probe pre-offset default */
+	SR_CONF_PROBE_PREOFF_MARGIN,         /* 60086 — probe pre-offset margin */
+	SR_CONF_PROBE_VGAIN,                 /* 60087 — probe vgain */
+	SR_CONF_PROBE_VGAIN_DEFAULT,         /* 60088 — probe vgain default */
+	SR_CONF_PROBE_VGAIN_RANGE,           /* 60089 — probe vgain range */
+	SR_CONF_PROBE_COMB_COMP_EN,          /* 60090 — probe comb comp enable */
+	SR_CONF_PROBE_COMB_COMP,            /* 60091 — probe comb comp */
+	/* Demo driver: capture probe count, decoder load flag, file block count.
+	 * Ported from fork keys (was 30103/30027/30028) to avoid collision with
+	 * upstream 30xxx range. Used by demo driver for .demo file replay. */
+	SR_CONF_CAPTURE_NUM_PROBES,         /* 60092 — capture probe count */
+	SR_CONF_LOAD_DECODER,               /* 60093 — load decoder flag */
+	SR_CONF_NUM_BLOCKS,                 /* 60094 — file block count */
 
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };

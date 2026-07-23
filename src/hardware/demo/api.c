@@ -95,6 +95,16 @@ static const uint32_t devopts[] = {
 	SR_CONF_REF_MIN | SR_CONF_GET,
 	SR_CONF_REF_MAX | SR_CONF_GET,
 	SR_CONF_MAX_HEIGHT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* DSO max height byte value (companion to MAX_HEIGHT string). Bound as
+	 * enum in deviceoptions.cpp:118 so the GUI can show the numeric value. */
+	SR_CONF_MAX_HEIGHT_VALUE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* Loop capture toggle. capturemanager.cpp:197 calls set_config_bool. When
+	 * TRUE, dev_acquisition_stop re-arms acquisition instead of finalizing. */
+	SR_CONF_LOOP_MODE | SR_CONF_GET | SR_CONF_SET,
+	/* Logic channel-mode selection (string). deviceoptions.cpp/mainwindow.cpp/
+	 * session_service.cpp call get/set_config_string. config_list returns the
+	 * 4 mode strings; logic_adjust_samplerate() clamps cur_samplerate on set. */
+	SR_CONF_CHANNEL_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	/* Probe config key list (for ProbeOptions binding — DAQ/DSO map_*). */
 	SR_CONF_PROBE_CONFIGS | SR_CONF_LIST,
 	/* Per-channel probe keys also advertised at device level so upstream
@@ -110,6 +120,19 @@ static const uint32_t devopts[] = {
 	/* DSO max sample rate (per-channel). Used by SamplingBar to clamp the
 	 * timebase-derived sample rate in commit_hori_res(). */
 	SR_CONF_MAX_DSO_SAMPLERATE | SR_CONF_GET,
+	/* Device working mode (LOGIC/DSO/ANALOG). Mirrors fork SR_CONF_DEVICE_MODE.
+	 * set toggles ch->enabled flags; get returns current mode. */
+	SR_CONF_DEVICE_MODE | SR_CONF_GET | SR_CONF_SET,
+	/* Capture probe count. Sets devc->num_probes for .demo replay. */
+	SR_CONF_CAPTURE_NUM_PROBES | SR_CONF_SET,
+	/* Load decoder flag: TRUE when sample_generator != DEMO_GEN_RANDOM. */
+	SR_CONF_LOAD_DECODER | SR_CONF_GET,
+	/* Zero calibration ability (always FALSE for demo). */
+	SR_CONF_HAVE_ZERO | SR_CONF_GET,
+	/* File block count for .demo replay. */
+	SR_CONF_NUM_BLOCKS | SR_CONF_GET | SR_CONF_SET,
+	/* Max DSO sample limits (SR_KHZ(20) = 20000). */
+	SR_CONF_MAX_DSO_SAMPLELIMITS | SR_CONF_GET,
 };
 
 static const uint32_t devopts_cg_logic[] = {
@@ -126,6 +149,12 @@ static const uint32_t devopts_cg_analog_channel[] = {
 	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_AMPLITUDE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	/* DAQ per-channel enable toggle (signalmodel.cpp calls set_config_bool
+	 * with channel group). Mirrors DSO PROBE_EN. */
+	SR_CONF_PROBE_EN | SR_CONF_GET | SR_CONF_SET,
+	/* DAQ probe attenuation factor (1x/10x/100x). deviceoptions.cpp:122
+	 * binds as enum. */
+	SR_CONF_PROBE_FACTOR | SR_CONF_GET | SR_CONF_SET,
 	/* DAQ probe controls (coupling / vdiv / scale mapping). */
 	SR_CONF_PROBE_VDIV | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_COUPLING | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
@@ -142,6 +171,13 @@ static const uint32_t devopts_cg_dso_channel[] = {
 	SR_CONF_PROBE_HW_OFFSET | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_TRIGGER_VALUE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_FACTOR | SR_CONF_GET | SR_CONF_SET,
+	/* DSO per-channel enable toggle. signalmodel.cpp:159,303 calls
+	 * set_config_bool(SR_CONF_PROBE_EN, enabled, ch, NULL). */
+	SR_CONF_PROBE_EN | SR_CONF_GET | SR_CONF_SET,
+	/* DSO pattern selection (random/sine/square/sawtooth/triangle).
+	 * Bound as enum in deviceoptions.cpp:114. config_list returns
+	 * dso_pattern_strs[]; config_set selects the DSO waveform generator. */
+	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
@@ -184,8 +220,55 @@ static const uint64_t dso_timebases[] = {
 /* DSO max height strings. */
 static const char *dso_max_heights[] = { "1X", "2X", "3X", "4X", "5X" };
 
+/* DSO max height byte values (companion to dso_max_heights[]). Returned by
+ * SR_CONF_MAX_HEIGHT_VALUE — bound as enum in deviceoptions.cpp:118 so the
+ * GUI can show the numeric value alongside the string. Indexes match
+ * dso_max_heights[]: 1X->0x33, 2X->0x66, 3X->0x99, 4X->0xCC, 5X->0xFF. */
+static const uint8_t dso_max_height_values[] = { 0x33, 0x66, 0x99, 0xCC, 0xFF };
+
 /* DSO probe map units. */
 static const char *dso_map_units[] = { "V", "A", "°C", "°F", "g", "m", "m/s" };
+
+/* DSO pattern strings for SR_CONF_PATTERN_MODE on the DSO channel group.
+ * Indexed by enum demo_dso_pattern. Mirrors old fork demo's DSO pattern set
+ * so the GUI's pattern-mode dropdown shows the same options for DSO as for
+ * LOGIC/ANALOG channels. */
+static const char *dso_pattern_strs[] = {
+	"random",
+	"sine",
+	"square",
+	"sawtooth",
+	"triangle",
+};
+
+/* Logic channel-mode descriptor table. Each entry trades channel count for
+ * max samplerate. SR_CONF_CHANNEL_MODE (string config) selects among these.
+ * Mirrors old fork demo's logic_channel_modes[] but simplified to the fields
+ * the new GUI actually consumes (descr string + max_samplerate for clamp).
+ * The string is what config_list returns via g_variant_new_strv and what
+ * config_get returns for the current mode. */
+struct demo_logic_channel_mode {
+	enum demo_logic_channel_id id;
+	enum demo_logic_channel_index index;
+	uint16_t num_channels;
+	uint64_t max_samplerate;
+	const char *descr;
+};
+static const struct demo_logic_channel_mode logic_channel_modes[] = {
+	{ DEMO_LOGIC125x16,  LOGIC125x16,  16, SR_MHZ(125), "Use 16 Channels (Max 125MHz)" },
+	{ DEMO_LOGIC250x12,  LOGIC250x12,  12, SR_MHZ(250), "Use 12 Channels (Max 250MHz)" },
+	{ DEMO_LOGIC500x6,   LOGIC500x6,    6, SR_MHZ(500), "Use 6 Channels (Max 500MHz)"  },
+	{ DEMO_LOGIC1000x3,  LOGIC1000x3,   3, SR_GHZ(1),   "Use 3 Channels (Max 1GHz)"   },
+};
+
+/* String array view of logic_channel_modes[].descr for std_str_idx validation
+ * in config_set and g_variant_new_strv in config_list. */
+static const char *logic_channel_mode_strs[ARRAY_SIZE(logic_channel_modes)] = {
+	[LOGIC125x16]  = "Use 16 Channels (Max 125MHz)",
+	[LOGIC250x12]  = "Use 12 Channels (Max 250MHz)",
+	[LOGIC500x6]   = "Use 6 Channels (Max 500MHz)",
+	[LOGIC1000x3]  = "Use 3 Channels (Max 1GHz)",
+};
 
 /* Probe config keys exposed via SR_CONF_PROBE_CONFIGS for ProbeOptions
  * binding. Applies to both DSO and ANALOG (DAQ) channels — the binding
@@ -198,6 +281,25 @@ static const int32_t probe_configs[] = {
 	SR_CONF_PROBE_MAP_MIN,
 	SR_CONF_PROBE_MAP_MAX,
 };
+
+/* Clamp cur_samplerate to the current logic channel-mode's max. Called from
+ * config_set on SR_CONF_CHANNEL_MODE so switching to fewer channels (higher
+ * max samplerate) or more channels (lower max) keeps the rate in range. */
+SR_PRIV void logic_adjust_samplerate(struct dev_context *devc)
+{
+	uint64_t max_sr;
+
+	if (!devc)
+		return;
+	max_sr = logic_channel_modes[devc->logic_ch_mode_index].max_samplerate;
+	if (devc->cur_samplerate > max_sr) {
+		sr_info("demo: clamp cur_samplerate %" PRIu64 " -> %" PRIu64
+			" (channel mode '%s')",
+			devc->cur_samplerate, max_sr,
+			logic_channel_modes[devc->logic_ch_mode_index].descr);
+		devc->cur_samplerate = max_sr;
+	}
+}
 
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
@@ -265,6 +367,25 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->dso_trig_slope = 0;
 	devc->dso_buf = NULL;
 	devc->dso_sent_samples = 0;
+	/* DSO pattern + config-change regen flags (Tier A). Default pattern is
+	 * random so demo behavior matches old fork demo's default until the user
+	 * picks sine/square/sawtooth/triangle via the DSO PATTERN_MODE dropdown. */
+	devc->dso_pattern = DEMO_DSO_PATTERN_RANDOM;
+	devc->dso_vdiv_change = FALSE;
+	devc->dso_offset_change = FALSE;
+	devc->dso_timebase_change = FALSE;
+	devc->instant = FALSE;
+	devc->loop_mode = FALSE;
+	/* Logic channel-mode default: 16ch@125M (widest channel count). The GUI
+	 * shows a radio-button group built from SR_CONF_CHANNEL_MODE config_list;
+	 * user can switch to 12ch/6ch/3ch for higher max samplerate. */
+	devc->logic_ch_mode = DEMO_LOGIC125x16;
+	devc->logic_ch_mode_index = LOGIC125x16;
+	/* Analog random cyclic buffer (allocated lazily by init_analog_random_data
+	 * when PATTERN_ANALOG_RANDOM is first selected on an ANALOG channel). */
+	devc->analog_random_buf = NULL;
+	devc->analog_random_buf_len = 0;
+	devc->analog_random_read_pos = 0;
 	/* DAQ (ANALOG) per-channel defaults. */
 	for (i = 0; i < num_analog_channels && i < DSO_MAX_CHANNELS; i++) {
 		devc->analog_vdiv[i] = DSO_DEFAULT_VDIV;
@@ -279,6 +400,29 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->dso_trig_value[i] = DSO_DEFAULT_TRIG_VAL;
 		devc->dso_enabled[i] = TRUE;
 	}
+
+	/* .demo replay + device-mode state init (Tier B). g_malloc0 already
+	 * zeroed everything; explicit init here keeps the contract clear.
+	 * demo_file_path MUST be g_strdup("") rather than NULL because
+	 * demo_reset_dsl_path safe_free's it before re-allocating. */
+	devc->device_mode = DEMO_MODE_LOGIC;
+	devc->sample_generator = DEMO_GEN_RANDOM;
+	devc->num_blocks = 0;
+	devc->cur_block = 0;
+	devc->total_samples = 0;
+	devc->trig_pos = 0;
+	devc->data_buf = NULL;
+	devc->data_buf_len = 0;
+	devc->load_data = TRUE;
+	devc->vdiv_change = FALSE;
+	devc->offset_change = FALSE;
+	devc->timebase_change = FALSE;
+	devc->b_load_directory = FALSE;
+	devc->packet_buffer = NULL;
+	devc->demo_file_path = g_strdup("");
+	devc->num_probes = num_logic_channels;
+	devc->archive = NULL;
+	devc->mstatus.measure_valid = TRUE;
 
 	if (num_logic_channels > 0) {
 		/* Logic channels, all in one channel group. */
@@ -375,6 +519,31 @@ static void clear_helper(struct dev_context *devc)
 	/* DSO scratch buffer. */
 	g_free(devc->dso_buf);
 	devc->dso_buf = NULL;
+
+	/* Analog random cyclic buffer (allocated by init_analog_random_data). */
+	g_free(devc->analog_random_buf);
+	devc->analog_random_buf = NULL;
+	devc->analog_random_buf_len = 0;
+	devc->analog_random_read_pos = 0;
+
+	/* .demo file replay resources (Tier B). */
+	demo_close_archive(devc);
+	g_free(devc->demo_file_path);
+	g_free(devc->data_buf);
+	if (devc->packet_buffer) {
+		int i;
+		g_free(devc->packet_buffer->post_buf);
+		for (i = 0; i < MAX_PROBE_NUM; i++)
+			g_free(devc->packet_buffer->block_bufs[i]);
+		g_free(devc->packet_buffer);
+	}
+	/* demo_pattern_array: per-mode pattern file name list. Index 0 is the
+	 * static literal "random" (not g_strdup'd); indices >=1 are g_strdup'd
+	 * by demo_get_pattern_mode_from_file(). */
+	for (int m = 0; m < 3; m++) {
+		for (int i = 1; i < devc->demo_pattern_array[m].count; i++)
+			g_free(devc->demo_pattern_array[m].patterns[i]);
+	}
 }
 
 static int dev_clear(const struct sr_dev_driver *di)
@@ -444,6 +613,10 @@ static int config_get(uint32_t key, GVariant **data,
 			ag = g_hash_table_lookup(devc->ch_ag, ch);
 			pattern = ag->pattern;
 			*data = g_variant_new_string(analog_pattern_str[pattern]);
+		} else if (ch->type == SR_CHANNEL_DSO) {
+			/* DSO pattern (random/sine/square/sawtooth/triangle). Shared
+			 * across all DSO channels — demo generates one waveform shape. */
+			*data = g_variant_new_string(dso_pattern_strs[devc->dso_pattern]);
 		} else
 			return SR_ERR_BUG;
 		break;
@@ -490,7 +663,26 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_byte(devc->dso_trig_hrate);
 		break;
 	case SR_CONF_INSTANT:
-		*data = g_variant_new_boolean(FALSE);
+		/* Instant mode: when TRUE, demo_send_dso_packet sends progressive
+		 * packets based on elapsed time rather than one full frame per
+		 * tick. Set via deviceoptions.cpp:156 bool binding. */
+		*data = g_variant_new_boolean(devc->instant);
+		break;
+	case SR_CONF_LOOP_MODE:
+		/* Loop capture toggle. capturemanager.cpp:197 calls set_config_bool.
+		 * When TRUE, dev_acquisition_stop re-arms acquisition. */
+		*data = g_variant_new_boolean(devc->loop_mode);
+		break;
+	case SR_CONF_CHANNEL_MODE:
+		/* Logic channel-mode string. deviceoptions.cpp/mainwindow.cpp/
+		 * session_service.cpp call get_config_string. */
+		*data = g_variant_new_string(
+			logic_channel_modes[devc->logic_ch_mode_index].descr);
+		break;
+	case SR_CONF_MAX_HEIGHT_VALUE:
+		/* Byte value companion to MAX_HEIGHT string. deviceoptions.cpp:118
+		 * binds as enum. Demo default is 1X (index 0). */
+		*data = g_variant_new_byte(dso_max_height_values[0]);
 		break;
 	case SR_CONF_HW_DEPTH:
 		/* HW_DEPTH depends on what the frontend is asking about:
@@ -526,6 +718,21 @@ static int config_get(uint32_t key, GVariant **data,
 		 * clamp commit_hori_res() output. */
 		*data = g_variant_new_uint64(SR_MHZ(200));
 		break;
+	case SR_CONF_DEVICE_MODE:
+		*data = g_variant_new_int16((int16_t)devc->device_mode);
+		break;
+	case SR_CONF_LOAD_DECODER:
+		*data = g_variant_new_boolean(devc->sample_generator != DEMO_GEN_RANDOM);
+		break;
+	case SR_CONF_HAVE_ZERO:
+		*data = g_variant_new_boolean(FALSE);
+		break;
+	case SR_CONF_NUM_BLOCKS:
+		*data = g_variant_new_uint64((uint64_t)devc->num_blocks);
+		break;
+	case SR_CONF_MAX_DSO_SAMPLELIMITS:
+		*data = g_variant_new_uint64(SR_KHZ(20));
+		break;
 	/* --- DSO per-channel config --- */
 	case SR_CONF_PROBE_VDIV:
 	case SR_CONF_PROBE_COUPLING:
@@ -533,6 +740,7 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_PROBE_OFFSET:
 	case SR_CONF_PROBE_HW_OFFSET:
 	case SR_CONF_PROBE_FACTOR:
+	case SR_CONF_PROBE_EN:
 	case SR_CONF_PROBE_MAP_DEFAULT:
 	case SR_CONF_PROBE_MAP_UNIT:
 	case SR_CONF_PROBE_MAP_MIN:
@@ -589,8 +797,20 @@ static int config_get(uint32_t key, GVariant **data,
 			*data = g_variant_new_uint16(devc->dso_hw_offset[idx]);
 			break;
 		case SR_CONF_PROBE_FACTOR:
-			if (!is_dso) return SR_ERR_ARG;
-			*data = g_variant_new_uint64(devc->dso_vfactor[idx]);
+			/* DSO uses dso_vfactor[]; ANALOG (DAQ) returns fixed 1x. */
+			if (is_dso)
+				*data = g_variant_new_uint64(devc->dso_vfactor[idx]);
+			else
+				*data = g_variant_new_uint64(1);
+			break;
+		case SR_CONF_PROBE_EN:
+			/* Per-channel enable toggle. signalmodel.cpp:159,303 calls
+			 * set_config_bool with channel group. DSO uses dso_enabled[];
+			 * ANALOG always enabled (no per-channel disable state stored). */
+			if (is_dso)
+				*data = g_variant_new_boolean(devc->dso_enabled[idx]);
+			else
+				*data = g_variant_new_boolean(TRUE);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
 			*data = g_variant_new_boolean(TRUE);
@@ -680,8 +900,24 @@ static int config_set(uint32_t key, GVariant *data,
 			return SR_ERR_CHANNEL_GROUP;
 		logic_pattern = std_str_idx(data, ARRAY_AND_SIZE(logic_pattern_str));
 		analog_pattern = std_str_idx(data, ARRAY_AND_SIZE(analog_pattern_str));
-		if (logic_pattern < 0 && analog_pattern < 0)
-			return SR_ERR_ARG;
+		{
+			/* DSO pattern string lookup (random/sine/square/sawtooth/triangle).
+			 * Validated separately because the DSO cg only carries DSO channels. */
+			int dso_pattern = std_str_idx(data, ARRAY_AND_SIZE(dso_pattern_strs));
+			if (logic_pattern < 0 && analog_pattern < 0 && dso_pattern < 0)
+				return SR_ERR_ARG;
+			/* If any DSO channel is in this group, treat as DSO pattern set. */
+			ch = cg->channels->data;
+			if (ch->type == SR_CHANNEL_DSO) {
+				if (dso_pattern < 0)
+					return SR_ERR_ARG;
+				sr_dbg("Setting DSO pattern to %s", dso_pattern_strs[dso_pattern]);
+				devc->dso_pattern = (enum demo_dso_pattern)dso_pattern;
+				/* Trigger waveform regeneration on next packet send. */
+				devc->dso_vdiv_change = TRUE;
+				break;
+			}
+		}
 		for (l = cg->channels; l; l = l->next) {
 			ch = l->data;
 			if (ch->type == SR_CHANNEL_LOGIC) {
@@ -734,6 +970,8 @@ static int config_set(uint32_t key, GVariant *data,
 	/* --- DSO device-level config --- */
 	case SR_CONF_TIMEBASE:
 		devc->dso_timebase = g_variant_get_uint64(data);
+		/* Mark DSO waveform for regeneration on next packet send. */
+		devc->dso_timebase_change = TRUE;
 		break;
 	case SR_CONF_TRIGGER_SOURCE:
 		devc->dso_trig_source = g_variant_get_byte(data);
@@ -745,10 +983,81 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->dso_trig_hrate = g_variant_get_byte(data);
 		break;
 	case SR_CONF_INSTANT:
-		/* Instant mode not implemented in demo; accept silently. */
+		/* Store instant flag — demo_send_dso_packet reads it to switch
+		 * between progressive time-based sending (instant=TRUE) and
+		 * one-full-frame-per-tick sending (instant=FALSE). */
+		devc->instant = g_variant_get_boolean(data);
+		sr_dbg("demo: set INSTANT=%d", devc->instant);
 		break;
+	case SR_CONF_LOOP_MODE:
+		/* Loop capture toggle. capturemanager.cpp:197 calls set_config_bool.
+		 * When TRUE, dev_acquisition_stop re-arms acquisition instead of
+		 * finalizing, so capture repeats until user stops. */
+		devc->loop_mode = g_variant_get_boolean(data);
+		sr_info("demo: set LOOP_MODE=%d", devc->loop_mode);
+		break;
+	case SR_CONF_DEVICE_MODE: {
+		int new_mode = g_variant_get_int16(data);
+		struct sr_channel *ch;
+		GSList *l;
+		/* Toggle channel enabled flags based on new mode. */
+		for (l = sdi->channels; l; l = l->next) {
+			ch = l->data;
+			switch (new_mode) {
+			case DEMO_MODE_LOGIC:
+				ch->enabled = (ch->type == SR_CHANNEL_LOGIC);
+				break;
+			case DEMO_MODE_DSO:
+				ch->enabled = (ch->type == SR_CHANNEL_DSO);
+				break;
+			case DEMO_MODE_ANALOG:
+				ch->enabled = (ch->type == SR_CHANNEL_ANALOG);
+				break;
+			}
+		}
+		devc->device_mode = (enum demo_device_mode)new_mode;
+		/* Try to find default .demo file for the new mode. */
+		{
+			int nv = demo_get_pattern_mode_index_by_string(devc, new_mode,
+				new_mode == DEMO_MODE_LOGIC ? DEFAULT_LOGIC_FILE :
+				new_mode == DEMO_MODE_DSO ? DEFAULT_DSO_FILE : DEFAULT_ANALOG_FILE);
+			if (nv != -1)
+				devc->sample_generator = (uint8_t)nv;
+			else
+				devc->sample_generator = DEMO_GEN_RANDOM;
+		}
+		demo_reset_dsl_path(sdi, devc->sample_generator);
+		demo_load_virtual_device_session(sdi);
+		break;
+	}
+	case SR_CONF_CAPTURE_NUM_PROBES:
+		devc->num_probes = (int)g_variant_get_uint64(data);
+		break;
+	case SR_CONF_NUM_BLOCKS:
+		devc->num_blocks = (int)g_variant_get_uint64(data);
+		sr_dbg("Setting block number to %d.", devc->num_blocks);
+		break;
+	case SR_CONF_CHANNEL_MODE: {
+		/* Logic channel-mode selection (string). Validate via std_str_idx
+		 * against logic_channel_mode_strs[]; set index + id, then clamp
+		 * cur_samplerate to the mode's max via logic_adjust_samplerate(). */
+		int idx = std_str_idx(data, ARRAY_AND_SIZE(logic_channel_mode_strs));
+		if (idx < 0)
+			return SR_ERR_ARG;
+		devc->logic_ch_mode_index = (enum demo_logic_channel_index)idx;
+		devc->logic_ch_mode = logic_channel_modes[idx].id;
+		sr_info("demo: set CHANNEL_MODE='%s' (index=%d)",
+		        logic_channel_modes[idx].descr, idx);
+		logic_adjust_samplerate(devc);
+		break;
+	}
 	case SR_CONF_MAX_HEIGHT:
 		/* Accept but ignore; demo always uses 1X. */
+		break;
+	case SR_CONF_MAX_HEIGHT_VALUE:
+		/* Accept byte value; demo stores index 0 (1X) as the only real
+		 * state. The GUI binds this as enum alongside MAX_HEIGHT string. */
+		sr_dbg("demo: set MAX_HEIGHT_VALUE (ignored, demo uses 1X)");
 		break;
 	/* --- DSO per-channel config --- */
 	case SR_CONF_PROBE_VDIV:
@@ -757,6 +1066,7 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_PROBE_OFFSET:
 	case SR_CONF_PROBE_HW_OFFSET:
 	case SR_CONF_PROBE_FACTOR:
+	case SR_CONF_PROBE_EN:
 	case SR_CONF_PROBE_MAP_DEFAULT:
 	case SR_CONF_PROBE_MAP_UNIT:
 	case SR_CONF_PROBE_MAP_MIN:
@@ -786,9 +1096,11 @@ static int config_set(uint32_t key, GVariant *data,
 		}
 		switch (key) {
 		case SR_CONF_PROBE_VDIV:
-			if (is_dso)
+			if (is_dso) {
 				devc->dso_vdiv[idx] = g_variant_get_uint64(data);
-			else
+				/* Trigger DSO waveform regeneration (vdiv affects amplitude). */
+				devc->dso_vdiv_change = TRUE;
+			} else
 				devc->analog_vdiv[aidx] = g_variant_get_uint64(data);
 			break;
 		case SR_CONF_PROBE_COUPLING:
@@ -804,14 +1116,25 @@ static int config_set(uint32_t key, GVariant *data,
 		case SR_CONF_PROBE_OFFSET:
 			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_offset[idx] = g_variant_get_uint16(data);
+			/* Trigger DSO waveform regeneration (offset affects vertical shift). */
+			devc->dso_offset_change = TRUE;
 			break;
 		case SR_CONF_PROBE_HW_OFFSET:
 			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_hw_offset[idx] = g_variant_get_uint16(data);
 			break;
 		case SR_CONF_PROBE_FACTOR:
-			if (!is_dso) return SR_ERR_ARG;
-			devc->dso_vfactor[idx] = g_variant_get_uint64(data);
+			/* DSO uses dso_vfactor[]; ANALOG (DAQ) accepts but ignores
+			 * (no per-channel factor state stored for analog). */
+			if (is_dso)
+				devc->dso_vfactor[idx] = g_variant_get_uint64(data);
+			break;
+		case SR_CONF_PROBE_EN:
+			/* Per-channel enable toggle. signalmodel.cpp:159,303 calls
+			 * set_config_bool. DSO stores in dso_enabled[]; ANALOG accepts
+			 * silently (channels are enabled at scan time). */
+			if (is_dso)
+				devc->dso_enabled[idx] = g_variant_get_boolean(data);
 			break;
 		case SR_CONF_PROBE_MAP_DEFAULT:
 		case SR_CONF_PROBE_MAP_UNIT:
@@ -855,6 +1178,19 @@ static int config_list(uint32_t key, GVariant **data,
 			break;
 		case SR_CONF_MAX_HEIGHT:
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_max_heights));
+			break;
+		case SR_CONF_MAX_HEIGHT_VALUE:
+			/* Byte values companion to MAX_HEIGHT strings. Bound as enum
+			 * in deviceoptions.cpp:118. */
+			*data = g_variant_new_fixed_array(G_VARIANT_TYPE("y"),
+				dso_max_height_values, ARRAY_SIZE(dso_max_height_values),
+				sizeof(uint8_t));
+			break;
+		case SR_CONF_CHANNEL_MODE:
+			/* Logic channel-mode string list. deviceoptions.cpp:380 reads
+			 * via g_variant_get_strv and builds a radio-button group.
+			 * deviceoptionsdock.cpp does the same for the dock variant. */
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(logic_channel_mode_strs));
 			break;
 		case SR_CONF_PROBE_CONFIGS:
 			/* Returns the list of probe-config keys supported by
@@ -920,6 +1256,9 @@ static int config_list(uint32_t key, GVariant **data,
 				*data = g_variant_new_strv(ARRAY_AND_SIZE(logic_pattern_str));
 			else if (ch->type == SR_CHANNEL_ANALOG)
 				*data = g_variant_new_strv(ARRAY_AND_SIZE(analog_pattern_str));
+			else if (ch->type == SR_CHANNEL_DSO)
+				/* DSO pattern list (random/sine/square/sawtooth/triangle). */
+				*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_pattern_strs));
 			else
 				return SR_ERR_BUG;
 			break;
@@ -1100,6 +1439,20 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+static int dev_open(struct sr_dev_inst *sdi)
+{
+	int ret;
+
+	ret = std_dummy_dev_open(sdi);
+	if (ret != SR_OK)
+		return ret;
+
+	/* Scan .demo files on first open. */
+	demo_scan_dsl_file(sdi);
+
+	return SR_OK;
+}
+
 static struct sr_dev_driver demo_driver_info = {
 	.name = "demo",
 	.longname = "Demo driver and pattern generator",
@@ -1112,7 +1465,7 @@ static struct sr_dev_driver demo_driver_info = {
 	.config_get = config_get,
 	.config_set = config_set,
 	.config_list = config_list,
-	.dev_open = std_dummy_dev_open,
+	.dev_open = dev_open,
 	.dev_close = std_dummy_dev_close,
 	.dev_acquisition_start = dev_acquisition_start,
 	.dev_acquisition_stop = dev_acquisition_stop,

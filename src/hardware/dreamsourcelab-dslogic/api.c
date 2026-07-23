@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2013 Bert Vermeulen <bert@biot.com>
  * Copyright (C) 2012 Joel Holdsworth <joel@airwebreathe.org.uk>
+ * Copyright (C) 2013 DreamSourceLab <support@dreamsourcelab.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,49 +23,833 @@
 #include <math.h>
 #include "protocol.h"
 
-static const struct dslogic_profile supported_device[] = {
-	/* DreamSourceLab DSLogic */
-	{ 0x2a0e, 0x0001, "DreamSourceLab", "DSLogic", NULL,
-		"dreamsourcelab-dslogic-fx2.fw",
-		0, "DreamSourceLab", "DSLogic", 256 * 1024 * 1024},
-	/* DreamSourceLab DSCope */
-	{ 0x2a0e, 0x0002, "DreamSourceLab", "DSCope", NULL,
-		"dreamsourcelab-dscope-fx2.fw",
-		0, "DreamSourceLab", "DSCope", 256 * 1024 * 1024},
-	/* DreamSourceLab DSLogic Pro */
-	{ 0x2a0e, 0x0003, "DreamSourceLab", "DSLogic Pro", NULL,
-		"dreamsourcelab-dslogic-pro-fx2.fw",
-		0, "DreamSourceLab", "DSLogic", 256 * 1024 * 1024},
-	/* DreamSourceLab DSLogic Plus */
-	{ 0x2a0e, 0x0020, "DreamSourceLab", "DSLogic Plus", NULL,
-		"dreamsourcelab-dslogic-plus-fx2.fw",
-		0, "DreamSourceLab", "DSLogic", 256 * 1024 * 1024},
-	/* DreamSourceLab DSLogic Basic */
-	{ 0x2a0e, 0x0021, "DreamSourceLab", "DSLogic Basic", NULL,
-		"dreamsourcelab-dslogic-basic-fx2.fw",
-		0, "DreamSourceLab", "DSLogic", 256 * 1024},
+/* --- Test mode values (fork SR_TEST_* not in upstream) --- */
+#define DSL_TEST_NONE		0
+#define DSL_TEST_INTERNAL	1
 
-	ALL_ZERO
+/* --- Buffer option values (fork SR_BUF_* not in upstream) --- */
+#define DSL_BUF_STOP		0
+#define DSL_BUF_UPLOAD		1
+
+/* ===========================================================================
+ * 1. Profile table — 25 devices (14 DSLogic + 11 DSCope)
+ *    Data copied from old dsl.h supported_DSLogic[] + supported_DSCope[].
+ * =========================================================================== */
+static const struct DSL_profile supported_device[] = {
+	/*
+	 * DSLogic (14 profiles)
+	 */
+	{DS_VENDOR_ID, 0x0001, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic", NULL,
+	 "DSLogic.fw",
+	 "DSLogic33.bin",
+	 "DSLogic50.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_SEEP | CAPS_FEATURE_BUF,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4) |
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  16,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  DSL_BUFFER100x16,
+	  vdivs10to2000,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{DS_VENDOR_ID, 0x0003, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic Pro", NULL,
+	 "DSLogicPro.fw",
+	 "DSLogicPro.bin",
+	 "DSLogicPro.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_SEEP | CAPS_FEATURE_VTH | CAPS_FEATURE_BUF,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4),
+	  16,
+	  SR_MB(256),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{DS_VENDOR_ID, 0x0020, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic PLus", NULL,
+	 "DSLogicPlus.fw",
+	 "DSLogicPlus.bin",
+	 "DSLogicPlus.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4),
+	  16,
+	  SR_MB(256),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{DS_VENDOR_ID, 0x0021, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic Basic", NULL,
+	 "DSLogicBasic.fw",
+	 "DSLogicBasic.bin",
+	 "DSLogicBasic.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4),
+	  16,
+	  SR_KB(256),
+	  0,
+	  DSL_STREAM20x16,
+	  0,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{DS_VENDOR_ID, 0x0029, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U2Basic", NULL,
+	 "DSLogicU2Basic.fw",
+	 "DSLogicU2Basic.bin",
+	 "DSLogicU2Basic.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16),
+	  16,
+	  SR_MB(64),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates100,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{DS_VENDOR_ID, 0x002A, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U3Pro16", NULL,
+	 "DSLogicU3Pro16.fw",
+	 "DSLogicU3Pro16.bin",
+	 "DSLogicU3Pro16.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_USB30 | CAPS_FEATURE_ADF4360,
+	  (1 << DSL_STREAM20x16_3DN2) | (1 << DSL_STREAM25x12_3DN2) | (1 << DSL_STREAM50x6_3DN2) | (1 << DSL_STREAM100x3_3DN2) |
+	  (1 << DSL_BUFFER500x16) | (1 << DSL_BUFFER1000x8),
+	  16,
+	  SR_GB(2),
+	  0,
+	  DSL_BUFFER500x16,
+	  0,
+	  samplerates1000,
+	  0,
+	  DSL_STREAM20x16_3DN2,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(500),
+	  SR_GHZ(1)}
+	},
+
+	{DS_VENDOR_ID, 0x002A, LIBUSB_SPEED_SUPER, "DreamSourceLab", "DSLogic U3Pro16", NULL,
+	 "DSLogicU3Pro16.fw",
+	 "DSLogicU3Pro16.bin",
+	 "DSLogicU3Pro16.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_USB30 | CAPS_FEATURE_ADF4360,
+	  (1 << DSL_STREAM125x16_16) | (1 << DSL_STREAM250x12_16) | (1 << DSL_STREAM500x6) | (1 << DSL_STREAM1000x3) |
+	  (1 << DSL_BUFFER500x16) | (1 << DSL_BUFFER1000x8),
+	  16,
+	  SR_GB(2),
+	  0,
+	  DSL_BUFFER500x16,
+	  0,
+	  samplerates1000,
+	  0,
+	  DSL_STREAM125x16_16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(500),
+	  SR_GHZ(1)}
+	},
+
+	{DS_VENDOR_ID, 0x002C, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U3Pro32", NULL,
+	 "DSLogicU3Pro32.fw",
+	 "DSLogicU3Pro32.bin",
+	 "DSLogicU3Pro32.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_USB30 | CAPS_FEATURE_ADF4360 | CAPS_FEATURE_LA_CH32,
+	  (1 << DSL_STREAM10x32_32_3DN2) | (1 << DSL_STREAM20x16_32_3DN2) | (1 << DSL_STREAM25x12_32_3DN2) | (1 << DSL_STREAM50x6_32_3DN2) | (1 << DSL_STREAM100x3_32_3DN2) |
+	  (1 << DSL_BUFFER250x32) | (1 << DSL_BUFFER500x16) | (1 << DSL_BUFFER1000x8),
+	  32,
+	  SR_GB(2),
+	  0,
+	  DSL_BUFFER250x32,
+	  0,
+	  samplerates1000,
+	  0,
+	  DSL_STREAM10x32_32_3DN2,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(500),
+	  SR_GHZ(1)}
+	},
+
+	{DS_VENDOR_ID, 0x002C, LIBUSB_SPEED_SUPER, "DreamSourceLab", "DSLogic U3Pro32", NULL,
+	 "DSLogicU3Pro32.fw",
+	 "DSLogicU3Pro32.bin",
+	 "DSLogicU3Pro32.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_USB30 | CAPS_FEATURE_ADF4360 | CAPS_FEATURE_LA_CH32,
+	  (1 << DSL_STREAM50x32) | (1 << DSL_STREAM100x30) | (1 << DSL_STREAM250x12) | (1 << DSL_STREAM500x6) | (1 << DSL_STREAM1000x3) |
+	  (1 << DSL_BUFFER250x32) | (1 << DSL_BUFFER500x16) | (1 << DSL_BUFFER1000x8),
+	  32,
+	  SR_GB(2),
+	  0,
+	  DSL_BUFFER250x32,
+	  0,
+	  samplerates1000,
+	  0,
+	  DSL_STREAM50x32,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(500),
+	  SR_GHZ(1)}
+	},
+
+	{DS_VENDOR_ID, 0x002D, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U2Pro16", NULL,
+	 "DSLogicU2Pro16.fw",
+	 "DSLogicU2Pro16.bin",
+	 "DSLogicU2Pro16.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_ADF4360 | CAPS_FEATURE_SECURITY,
+	  (1 << DSL_STREAM20x16_3DN2) | (1 << DSL_STREAM25x12_3DN2) | (1 << DSL_STREAM50x6_3DN2) | (1 << DSL_STREAM100x3_3DN2) |
+	  (1 << DSL_BUFFER500x16) | (1 << DSL_BUFFER1000x8),
+	  16,
+	  SR_GB(4),
+	  0,
+	  DSL_BUFFER500x16,
+	  0,
+	  samplerates1000,
+	  0,
+	  DSL_STREAM20x16_3DN2,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(500),
+	  SR_GHZ(1)}
+	},
+
+	{0x2A0E, 0x0030, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic PLus", NULL,
+	 "DSLogicPlus.fw",
+	 "DSLogicPlus-pgl12.bin",
+	 "DSLogicPlus-pgl12.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_MAX25_VTH | CAPS_FEATURE_SECURITY,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4),
+	  16,
+	  SR_MB(256),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{0x2A0E, 0x0031, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U2Basic", NULL,
+	 "DSLogicU2Basic.fw",
+	 "DSLogicU2Basic-pgl12.bin",
+	 "DSLogicU2Basic-pgl12.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_MAX25_VTH | CAPS_FEATURE_SECURITY,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16),
+	  16,
+	  SR_MB(64),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates100,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{0x2A0E, 0x0034, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic PLus", NULL,
+	 "DSLogicPlus-pgl12-2.fw",
+	 "DSLogicPlus-pgl12-2.bin",
+	 "DSLogicPlus-pgl12-2.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_MAX25_VTH | CAPS_FEATURE_SECURITY,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16) | (1 << DSL_BUFFER200x8) | (1 << DSL_BUFFER400x4),
+	  16,
+	  SR_MB(256),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates400,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	{0x2A0E, 0x0035, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSLogic U2Basic", NULL,
+	 "DSLogicU2Basic-pgl12-2.fw",
+	 "DSLogicU2Basic-pgl12-2.bin",
+	 "DSLogicU2Basic-pgl12-2.bin",
+	 {CAPS_MODE_LOGIC,
+	  CAPS_FEATURE_VTH | CAPS_FEATURE_BUF | CAPS_FEATURE_MAX25_VTH | CAPS_FEATURE_SECURITY,
+	  (1 << DSL_STREAM20x16) | (1 << DSL_STREAM25x12) | (1 << DSL_STREAM50x6) | (1 << DSL_STREAM100x3) |
+	  (1 << DSL_BUFFER100x16),
+	  16,
+	  SR_MB(64),
+	  0,
+	  DSL_BUFFER100x16,
+	  0,
+	  samplerates100,
+	  0,
+	  DSL_STREAM20x16,
+	  SR_MHZ(1),
+	  SR_Mn(1),
+	  0,
+	  0,
+	  0,
+	  0,
+	  0,
+	  SR_MHZ(200),
+	  SR_MHZ(400)}
+	},
+
+	/*
+	 * DSCope (11 profiles)
+	 */
+	{DS_VENDOR_ID, 0x0002, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope", NULL,
+	 "DSCope.fw",
+	 "DSCope.bin",
+	 "DSCope.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_PREOFF | CAPS_FEATURE_SEEP | CAPS_FEATURE_BUF,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  1,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  (129 << 8) + 167,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0004, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope20", NULL,
+	 "DSCope20.fw",
+	 "DSCope20.bin",
+	 "DSCope20.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_SEEP | CAPS_FEATURE_BUF,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  2,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  920,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0022, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope B20", NULL,
+	 "DSCopeB20.fw",
+	 "DSCope20.bin",
+	 "DSCope20.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_BUF,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  2,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  920,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0023, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope C20", NULL,
+	 "DSCopeC20.fw",
+	 "DSCopeC20P.bin",
+	 "DSCopeC20P.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_BUF,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  3,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  920,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0024, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope C20P", NULL,
+	 "DSCopeC20P.fw",
+	 "DSCopeC20P.bin",
+	 "DSCopeC20P.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_BUF | CAPS_FEATURE_POGOPIN,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  3,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  920,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0025, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope C20", NULL,
+	 "DSCopeC20B.fw",
+	 "DSCopeC20B.bin",
+	 "DSCopeC20B.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_KB(256),
+	  SR_Kn(20),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  3,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Kn(10),
+	  920,
+	  1024 - 920,
+	  1,
+	  255,
+	  0,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0026, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope U2B20", NULL,
+	 "DSCopeU2B20.fw",
+	 "DSCopeU2B20.bin",
+	 "DSCopeU2B20.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_AUTO_VGAIN,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_KB(256),
+	  SR_Kn(20),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  4,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Kn(10),
+	  930,
+	  1024 - 930,
+	  10,
+	  245,
+	  22,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0027, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope U2P20", NULL,
+	 "DSCopeU2P20.fw",
+	 "DSCopeU2P20.bin",
+	 "DSCopeU2P20.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_BUF | CAPS_FEATURE_POGOPIN | CAPS_FEATURE_AUTO_VGAIN,
+	  (1 << DSL_ANALOG10x2) |
+	  (1 << DSL_DSO200x2),
+	  2,
+	  SR_MB(256),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates400,
+	  4,
+	  DSL_DSO200x2,
+	  SR_MHZ(100),
+	  SR_Mn(1),
+	  930,
+	  1024 - 930,
+	  10,
+	  245,
+	  22,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x0028, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope U2B100", NULL,
+	 "DSCopeU2B100.fw",
+	 "DSCopeU2B100.bin",
+	 "DSCopeU2B100.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_HMCAD1511 | CAPS_FEATURE_20M,
+	  (1 << DSL_ANALOG10x2_500) |
+	  (1 << DSL_DSO1000x2),
+	  2,
+	  SR_KB(256),
+	  SR_Kn(20),
+	  0,
+	  vdivs10to2000,
+	  samplerates1000,
+	  4,
+	  DSL_DSO1000x2,
+	  SR_MHZ(500),
+	  SR_Kn(10),
+	  835,
+	  1024 - 835,
+	  10,
+	  245,
+	  60,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x002B, LIBUSB_SPEED_HIGH, "DreamSourceLab", "DSCope U3P100", NULL,
+	 "DSCopeU3P100.fw",
+	 "DSCopeU3P100.bin",
+	 "DSCopeU3P100.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_POGOPIN | CAPS_FEATURE_FLASH | CAPS_FEATURE_USB30 | CAPS_FEATURE_HMCAD1511 | CAPS_FEATURE_20M,
+	  (1 << DSL_ANALOG10x2_500) |
+	  (1 << DSL_DSO1000x2),
+	  2,
+	  SR_GB(2),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates1000,
+	  5,
+	  DSL_DSO1000x2,
+	  SR_MHZ(500),
+	  SR_Mn(1),
+	  780,
+	  1024 - 780,
+	  10,
+	  245,
+	  60,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	{DS_VENDOR_ID, 0x002B, LIBUSB_SPEED_SUPER, "DreamSourceLab", "DSCope U3P100", NULL,
+	 "DSCopeU3P100.fw",
+	 "DSCopeU3P100.bin",
+	 "DSCopeU3P100.bin",
+	 {CAPS_MODE_ANALOG | CAPS_MODE_DSO,
+	  CAPS_FEATURE_ZERO | CAPS_FEATURE_POGOPIN | CAPS_FEATURE_FLASH | CAPS_FEATURE_USB30 | CAPS_FEATURE_HMCAD1511 | CAPS_FEATURE_20M,
+	  (1 << DSL_ANALOG10x2_500) |
+	  (1 << DSL_DSO1000x2),
+	  2,
+	  SR_GB(2),
+	  SR_Mn(2),
+	  0,
+	  vdivs10to2000,
+	  samplerates1000,
+	  5,
+	  DSL_DSO1000x2,
+	  SR_MHZ(500),
+	  SR_Mn(1),
+	  780,
+	  1024 - 780,
+	  10,
+	  245,
+	  60,
+	  SR_HZ(0),
+	  SR_HZ(0)}
+	},
+
+	/* Terminator — ALL_ZERO equivalent (ALL_ZERO not defined in protocol.h) */
+	{0, 0, LIBUSB_SPEED_UNKNOWN, NULL, NULL, NULL, NULL, NULL, NULL, {0}}
 };
 
+/* ===========================================================================
+ * 2. Static data arrays
+ * =========================================================================== */
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
 };
 
 static const uint32_t drvopts[] = {
 	SR_CONF_LOGIC_ANALYZER,
+	SR_CONF_OSCILLOSCOPE,
 };
 
 static const uint32_t devopts[] = {
-	SR_CONF_CONTINUOUS | SR_CONF_SET | SR_CONF_GET,
-	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_EXTERNAL_CLOCK | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_CONTINUOUS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
+	SR_CONF_CAPTUREFILE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_NUM_HDIV | SR_CONF_GET,
+	SR_CONF_NUM_VDIV | SR_CONF_GET,
+	SR_CONF_CLOCK_TYPE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_CLOCK_EDGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_EXTERNAL_CLOCK | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_OPERATION_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_BUFFER_OPTIONS | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_CHANNEL_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_VTH | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_FILTER | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_MAX_HEIGHT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_MAX_HEIGHT_VALUE | SR_CONF_GET,
+	SR_CONF_RLE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_RLE_SUPPORT | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_INSTANT | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_DEVICE_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LOOP_MODE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TIMEBASE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_VDIV | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_FACTOR | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_COUPLING | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PROBE_EN | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_CHANNEL | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_HOLDOFF | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_MARGIN | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_HORIZ_TRIGGERPOS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_MAX_DSO_SAMPLERATE | SR_CONF_GET,
+	SR_CONF_MAX_DSO_SAMPLELIMITS | SR_CONF_GET,
+	SR_CONF_HW_DEPTH | SR_CONF_GET,
+	SR_CONF_VLD_CH_NUM | SR_CONF_GET,
+	SR_CONF_TOTAL_CH_NUM | SR_CONF_GET,
+	SR_CONF_STREAM | SR_CONF_GET,
+	SR_CONF_WAIT_UPLOAD | SR_CONF_GET,
+	SR_CONF_BANDWIDTH_LIMIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_VOLTAGE_THRESHOLD | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_USB_SPEED | SR_CONF_GET,
+	SR_CONF_USB30_SUPPORT | SR_CONF_GET,
+	/* DSO/ANALOG-specific keys (added to match demo driver coverage). */
+	SR_CONF_TRIGGER_VALUE | SR_CONF_GET | SR_CONF_SET,    /* DSO trig level (per-channel) */
+	SR_CONF_PROBE_HW_OFFSET | SR_CONF_GET | SR_CONF_SET,  /* hardware offset (per-channel) */
+	SR_CONF_MAX_TIMEBASE | SR_CONF_GET,                  /* max DSO timebase (ns) */
+	SR_CONF_MIN_TIMEBASE | SR_CONF_GET,                  /* min DSO timebase (ns) */
+	SR_CONF_REF_MIN | SR_CONF_GET,                       /* ADC reference min */
+	SR_CONF_REF_MAX | SR_CONF_GET,                       /* ADC reference max */
+	SR_CONF_UNIT_BITS | SR_CONF_GET,                     /* sample bits per channel */
+	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,    /* use default probe mapping */
+	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,  /* probe map unit */
+	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,    /* probe map min */
+	SR_CONF_PROBE_MAP_MAX | SR_CONF_GET | SR_CONF_SET,    /* probe map max */
+	SR_CONF_PROBE_CONFIGS | SR_CONF_LIST,                 /* probe config key list */
+	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,  /* waveform pattern */
+};
+
+/* ===========================================================================
+ * 3. String arrays for config_list
+ * =========================================================================== */
+static const char *opmode_strs[] = {
+	"Buffer Mode",
+	"Stream Mode",
+	"Internal Test",
+};
+
+static const char *bufoption_strs[] = {
+	"Stop immediately",
+	"Upload captured data",
+};
+
+static const char *threshold_strs[] = {
+	"1.8/2.5/3.3V Level",
+	"5.0V Level",
+};
+
+static const char *filter_strs[] = {
+	"None",
+	"1 Sample Clock",
+};
+
+static const char *max_height_strs[] = {
+	"1X", "2X", "3X", "4X", "5X",
+};
+
+static const char *signal_edges[] = {
+	"rising",
+	"falling",
+};
+
+static const char *coupling_strs[] = {
+	"GND", "DC", "AC",
+};
+
+static const char *device_mode_strs[] = {
+	"Logic Analyzer",
+	"Oscilloscope",
+};
+
+static const char *bandwidth_strs[] = {
+	"Full Bandwidth",
+	"20MHz",
+};
+
+static const double thresholds[][2] = {
+	{0.7, 1.4},
+	{1.4, 3.6},
 };
 
 static const int32_t trigger_matches[] = {
@@ -75,49 +860,72 @@ static const int32_t trigger_matches[] = {
 	SR_TRIGGER_EDGE,
 };
 
-static const char *signal_edges[] = {
-	[DS_EDGE_RISING] = "rising",
-	[DS_EDGE_FALLING] = "falling",
+/* DSO/ANALOG pattern-mode strings. Mirrors demo driver's dso_pattern_strs[]
+ * so the GUI pattern dropdown shows the same options. For real DSLogic
+ * hardware the waveform is supplied by the device itself (these strings
+ * are accepted/stored for GUI compat but have no device-side effect). */
+static const char *dso_pattern_strs[] = {
+	"random",
+	"sine",
+	"square",
+	"sawtooth",
+	"triangle",
 };
 
-static const double thresholds[][2] = {
-	{ 0.7, 1.4 },
-	{ 1.4, 3.6 },
+/* Probe mapping units — units selectable for the probe user-defined
+ * voltage/current/etc mapping (SR_CONF_PROBE_MAP_UNIT). Mirrors demo
+ * driver's dso_map_units[] so the GUI dropdown is consistent. */
+static const char *probe_map_units[] = { "V", "A", "°C", "°F", "g", "m", "m/s" };
+
+/* Probe-config keys exposed via SR_CONF_PROBE_CONFIGS for ProbeOptions
+ * binding. The binding iterates this list and creates widgets for
+ * VDIV/COUPLING/MAP_* keys. Applies to both DSO (oscilloscope) and
+ * ANALOG (DAQ) channels. */
+static const int32_t probe_configs[] = {
+	SR_CONF_PROBE_VDIV,
+	SR_CONF_PROBE_COUPLING,
+	SR_CONF_PROBE_MAP_DEFAULT,
+	SR_CONF_PROBE_MAP_UNIT,
+	SR_CONF_PROBE_MAP_MIN,
+	SR_CONF_PROBE_MAP_MAX,
 };
 
-static const uint64_t samplerates[] = {
-	SR_KHZ(10),
-	SR_KHZ(20),
-	SR_KHZ(50),
-	SR_KHZ(100),
-	SR_KHZ(200),
-	SR_KHZ(500),
-	SR_MHZ(1),
-	SR_MHZ(2),
-	SR_MHZ(5),
-	SR_MHZ(10),
-	SR_MHZ(20),
-	SR_MHZ(25),
-	SR_MHZ(50),
-	SR_MHZ(100),
-	SR_MHZ(200),
-	SR_MHZ(400),
-};
+/* ===========================================================================
+ * Helper functions
+ * =========================================================================== */
 
-static gboolean is_plausible(const struct libusb_device_descriptor *des)
+/* Count entries in a 0-terminated uint64_t array. */
+static unsigned int u64_array_count(const uint64_t *arr)
 {
-	int i;
+	unsigned int n = 0;
+
+	if (!arr)
+		return 0;
+	while (arr[n])
+		n++;
+	return n;
+}
+
+/* Check whether a USB device descriptor matches any known profile. */
+static gboolean is_plausible(const struct libusb_device_descriptor *des,
+			     enum libusb_speed speed)
+{
+	unsigned int i;
 
 	for (i = 0; supported_device[i].vid; i++) {
 		if (des->idVendor != supported_device[i].vid)
 			continue;
-		if (des->idProduct == supported_device[i].pid)
+		if (des->idProduct != supported_device[i].pid)
+			continue;
+		if (speed == supported_device[i].usb_speed)
 			return TRUE;
 	}
-
 	return FALSE;
 }
 
+/* ===========================================================================
+ * 4. scan()
+ * =========================================================================== */
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
 	struct drv_context *drvc;
@@ -127,7 +935,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	struct sr_channel *ch;
 	struct sr_channel_group *cg;
 	struct sr_config *src;
-	const struct dslogic_profile *prof;
+	const struct DSL_profile *prof;
 	GSList *l, *devices, *conn_devices;
 	gboolean has_firmware;
 	struct libusb_device_descriptor des;
@@ -137,6 +945,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	const char *conn;
 	char manufacturer[64], product[64], serial_num[64], connection_id[64];
 	char channel_name[16];
+	enum libusb_speed usb_speed;
+	struct dsl_channel_priv *ch_priv;
+	int num_ch;
 
 	drvc = di->context;
 
@@ -154,7 +965,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	else
 		conn_devices = NULL;
 
-	/* Find all DSLogic compatible devices and upload firmware to them. */
+	/* Find all DSLogic/DSCope compatible devices and upload firmware. */
 	devices = NULL;
 	libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
 	for (i = 0; devlist[i]; i++) {
@@ -163,18 +974,22 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			for (l = conn_devices; l; l = l->next) {
 				usb = l->data;
 				if (usb->bus == libusb_get_bus_number(devlist[i])
-					&& usb->address == libusb_get_device_address(devlist[i]))
+				    && usb->address == libusb_get_device_address(devlist[i]))
 					break;
 			}
 			if (!l)
-				/* This device matched none of the ones that
-				 * matched the conn specification. */
 				continue;
 		}
 
 		libusb_get_device_descriptor(devlist[i], &des);
 
-		if (!is_plausible(&des))
+		usb_speed = libusb_get_device_speed(devlist[i]);
+		if (usb_speed != LIBUSB_SPEED_HIGH && usb_speed != LIBUSB_SPEED_SUPER) {
+			sr_info("USB speed too low: %d", usb_speed);
+			continue;
+		}
+
+		if (!is_plausible(&des, usb_speed))
 			continue;
 
 		if ((ret = libusb_open(devlist[i], &hdl)) < 0) {
@@ -187,7 +1002,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		if (des.iManufacturer == 0) {
 			manufacturer[0] = '\0';
 		} else if ((ret = libusb_get_string_descriptor_ascii(hdl,
-				des.iManufacturer, (unsigned char *) manufacturer,
+				des.iManufacturer, (unsigned char *)manufacturer,
 				sizeof(manufacturer))) < 0) {
 			sr_warn("Failed to get manufacturer string descriptor: %s.",
 				libusb_error_name(ret));
@@ -197,7 +1012,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		if (des.iProduct == 0) {
 			product[0] = '\0';
 		} else if ((ret = libusb_get_string_descriptor_ascii(hdl,
-				des.iProduct, (unsigned char *) product,
+				des.iProduct, (unsigned char *)product,
 				sizeof(product))) < 0) {
 			sr_warn("Failed to get product string descriptor: %s.",
 				libusb_error_name(ret));
@@ -207,7 +1022,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		if (des.iSerialNumber == 0) {
 			serial_num[0] = '\0';
 		} else if ((ret = libusb_get_string_descriptor_ascii(hdl,
-				des.iSerialNumber, (unsigned char *) serial_num,
+				des.iSerialNumber, (unsigned char *)serial_num,
 				sizeof(serial_num))) < 0) {
 			sr_warn("Failed to get serial number string descriptor: %s.",
 				libusb_error_name(ret));
@@ -219,15 +1034,16 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		if (usb_get_port_path(devlist[i], connection_id, sizeof(connection_id)) < 0)
 			continue;
 
+		/* Match against supported_device[] by vid/pid/usb_speed. */
 		prof = NULL;
 		for (j = 0; supported_device[j].vid; j++) {
 			if (des.idVendor == supported_device[j].vid &&
-					des.idProduct == supported_device[j].pid) {
+			    des.idProduct == supported_device[j].pid &&
+			    usb_speed == supported_device[j].usb_speed) {
 				prof = &supported_device[j];
 				break;
 			}
 		}
-
 		if (!prof)
 			continue;
 
@@ -239,35 +1055,66 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sdi->serial_num = g_strdup(serial_num);
 		sdi->connection_id = g_strdup(connection_id);
 
-		/* Logic channels, all in one channel group. */
-		cg = sr_channel_group_new(sdi, "Logic", NULL);
-		for (j = 0; j < NUM_CHANNELS; j++) {
-			sprintf(channel_name, "%d", j);
-			ch = sr_channel_new(sdi, j, SR_CHANNEL_LOGIC,
-						TRUE, channel_name);
-			cg->channels = g_slist_append(cg->channels, ch);
-		}
-
+		/* Create dev_context and set defaults from profile. */
 		devc = dslogic_dev_new();
 		devc->profile = prof;
 		sdi->priv = devc;
-		devices = g_slist_append(devices, sdi);
 
-		devc->samplerates = samplerates;
-		devc->num_samplerates = ARRAY_SIZE(samplerates);
-		has_firmware = usb_match_manuf_prod(devlist[i], "DreamSourceLab", "USB-based Instrument");
+		devc->cur_samplerate = prof->dev_caps.default_samplerate;
+		devc->limit_samples = prof->dev_caps.default_samplelimit;
+		devc->ch_mode = prof->dev_caps.default_channelmode;
+		devc->mode = channel_modes[devc->ch_mode].mode;
+		devc->op_mode = LO_OP_STREAM;
+		devc->stream = TRUE;
+		devc->status = DSL_FINISH;
+		devc->vth = 1.0;
+		devc->th_level = 0;	/* SR_TH_3V3 */
+		devc->filter = 0;	/* SR_FILTER_NONE */
+		devc->buf_options = DSL_BUF_UPLOAD;
+		devc->timebase = 10000;
+		devc->trigger_slope = 0;	/* DSO_TRIGGER_RISING */
+		devc->trigger_source = 0;	/* DSO_TRIGGER_AUTO */
+		devc->trigger_hpos = 0;
+		devc->trigger_hrate = 0;
+		devc->trigger_holdoff = 0;
+		devc->trigger_margin = 8;
+		devc->trigger_channel = 0;
+		devc->rle_support = TRUE;
+		devc->max_height = 0;
+		devc->is_loop = 0;
+		devc->test_mode = DSL_TEST_NONE;
+
+		/* Create channels for the default channel mode. */
+		num_ch = channel_modes[devc->ch_mode].num;
+		cg = sr_channel_group_new(sdi,
+			(channel_modes[devc->ch_mode].type == SR_CHANNEL_DSO) ? "DSO" :
+			(channel_modes[devc->ch_mode].type == SR_CHANNEL_ANALOG) ? "Analog" :
+			"Logic", NULL);
+		for (j = 0; j < num_ch; j++) {
+			snprintf(channel_name, sizeof(channel_name), "%d", j);
+			ch = sr_channel_new(sdi, j,
+				channel_modes[devc->ch_mode].type, TRUE, channel_name);
+			ch_priv = g_malloc0(sizeof(struct dsl_channel_priv));
+			ch_priv->vdiv = (prof->dev_caps.vdivs) ? prof->dev_caps.vdivs[0] : 0;
+			ch_priv->vfactor = 1;
+			ch->priv = ch_priv;
+			cg->channels = g_slist_append(cg->channels, ch);
+		}
+
+		/* Check if firmware is already loaded. */
+		has_firmware = usb_match_manuf_prod(devlist[i],
+			"DreamSourceLab", "USB-based Instrument");
 
 		if (has_firmware) {
-			/* Already has the firmware, so fix the new address. */
-			sr_dbg("Found a DSLogic device.");
+			sr_dbg("Found a DSLogic/DSCope device.");
 			sdi->status = SR_ST_INACTIVE;
 			sdi->inst_type = SR_INST_USB;
-			sdi->conn = sr_usb_dev_inst_new(libusb_get_bus_number(devlist[i]),
-					libusb_get_device_address(devlist[i]), NULL);
+			sdi->conn = sr_usb_dev_inst_new(
+				libusb_get_bus_number(devlist[i]),
+				libusb_get_device_address(devlist[i]), NULL);
 		} else {
 			if (ezusb_upload_firmware(drvc->sr_ctx, devlist[i],
 					USB_CONFIGURATION, prof->firmware) == SR_OK) {
-				/* Store when this device's FW was updated. */
 				devc->fw_updated = g_get_monotonic_time();
 			} else {
 				sr_err("Firmware upload failed for "
@@ -277,9 +1124,12 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 				       prof->firmware);
 			}
 			sdi->inst_type = SR_INST_USB;
-			sdi->conn = sr_usb_dev_inst_new(libusb_get_bus_number(devlist[i]),
-					0xff, NULL);
+			sdi->conn = sr_usb_dev_inst_new(
+				libusb_get_bus_number(devlist[i]),
+				0xff, NULL);
 		}
+
+		devices = g_slist_append(devices, sdi);
 	}
 	libusb_free_device_list(devlist, 1);
 	g_slist_free_full(conn_devices, (GDestroyNotify)sr_usb_dev_inst_free);
@@ -287,6 +1137,9 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	return std_scan_complete(di, devices);
 }
 
+/* ===========================================================================
+ * 5. dev_open()
+ * =========================================================================== */
 static int dev_open(struct sr_dev_inst *sdi)
 {
 	struct sr_dev_driver *di = sdi->driver;
@@ -305,7 +1158,6 @@ static int dev_open(struct sr_dev_inst *sdi)
 	ret = SR_ERR;
 	if (devc->fw_updated > 0) {
 		sr_info("Waiting for device to reset.");
-		/* Takes >= 300ms for the FX2 to be gone from the USB bus. */
 		g_usleep(300 * 1000);
 		timediff_ms = 0;
 		while (timediff_ms < MAX_RENUM_DELAY_MS) {
@@ -347,27 +1199,28 @@ static int dev_open(struct sr_dev_inst *sdi)
 			       libusb_error_name(ret));
 			break;
 		}
-
 		return SR_ERR;
 	}
-
 
 	if ((ret = dslogic_fpga_firmware_upload(sdi)) != SR_OK)
 		return ret;
 
-	if (devc->cur_samplerate == 0) {
-		/* Samplerate hasn't been set; default to the slowest one. */
-		devc->cur_samplerate = devc->samplerates[0];
-	}
+	if (devc->cur_samplerate == 0)
+		devc->cur_samplerate = devc->profile->dev_caps.default_samplerate;
 
-	if (devc->cur_threshold == 0.0) {
-		devc->cur_threshold = thresholds[1][0];
-		return dslogic_set_voltage_threshold(sdi, devc->cur_threshold);
+	if (devc->vth == 0.0) {
+		devc->vth = thresholds[1][0];
+		ret = dslogic_set_voltage_threshold(sdi, devc->vth);
+		if (ret != SR_OK)
+			return ret;
 	}
 
 	return SR_OK;
 }
 
+/* ===========================================================================
+ * 6. dev_close()
+ * =========================================================================== */
 static int dev_close(struct sr_dev_inst *sdi)
 {
 	struct sr_usb_dev_inst *usb;
@@ -386,19 +1239,22 @@ static int dev_close(struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+/* ===========================================================================
+ * 7. config_get()
+ * =========================================================================== */
 static int config_get(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc;
 	struct sr_usb_dev_inst *usb;
+	struct sr_channel *ch;
 	int idx;
-
-	(void)cg;
 
 	if (!sdi)
 		return SR_ERR_ARG;
 
 	devc = sdi->priv;
+	ch = (cg && cg->channels) ? cg->channels->data : NULL;
 
 	switch (key) {
 	case SR_CONF_CONN:
@@ -406,42 +1262,238 @@ static int config_get(uint32_t key, GVariant **data,
 			return SR_ERR_ARG;
 		usb = sdi->conn;
 		if (usb->address == 255)
-			/* Device still needs to re-enumerate after firmware
-			 * upload, so we don't know its (future) address. */
 			return SR_ERR;
 		*data = g_variant_new_printf("%d.%d", usb->bus, usb->address);
 		break;
+	case SR_CONF_SAMPLERATE:
+		*data = g_variant_new_uint64(devc->cur_samplerate);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		*data = g_variant_new_uint64(devc->limit_samples);
+		break;
+	case SR_CONF_CAPTURE_RATIO:
+		*data = g_variant_new_uint64(devc->capture_ratio);
+		break;
+	case SR_CONF_CONTINUOUS:
+		*data = g_variant_new_boolean(devc->continuous_mode);
+		break;
+	case SR_CONF_EXTERNAL_CLOCK:
+		*data = g_variant_new_boolean(devc->external_clock);
+		break;
+	case SR_CONF_CLOCK_TYPE:
+		*data = g_variant_new_boolean(devc->clock_type);
+		break;
+	case SR_CONF_CLOCK_EDGE:
+		idx = devc->clock_edge ? 1 : 0;
+		*data = g_variant_new_string(signal_edges[idx]);
+		break;
+	case SR_CONF_OPERATION_MODE:
+		*data = g_variant_new_string(opmode_strs[devc->op_mode]);
+		break;
+	case SR_CONF_BUFFER_OPTIONS:
+		*data = g_variant_new_string(bufoption_strs[devc->buf_options]);
+		break;
+	case SR_CONF_CHANNEL_MODE:
+		*data = g_variant_new_string(channel_modes[devc->ch_mode].descr);
+		break;
+	case SR_CONF_THRESHOLD:
+		*data = g_variant_new_string(threshold_strs[devc->th_level]);
+		break;
+	case SR_CONF_VTH:
+		*data = g_variant_new_double(devc->vth);
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_string(filter_strs[devc->filter]);
+		break;
+	case SR_CONF_MAX_HEIGHT:
+		*data = g_variant_new_string(max_height_strs[devc->max_height]);
+		break;
+	case SR_CONF_MAX_HEIGHT_VALUE:
+		*data = g_variant_new_byte(devc->max_height);
+		break;
+	case SR_CONF_RLE:
+		*data = g_variant_new_boolean(devc->rle_mode);
+		break;
+	case SR_CONF_RLE_SUPPORT:
+		*data = g_variant_new_boolean(devc->rle_support);
+		break;
+	case SR_CONF_STREAM:
+		*data = g_variant_new_boolean(devc->stream);
+		break;
+	case SR_CONF_LOOP_MODE:
+		*data = g_variant_new_boolean(devc->is_loop);
+		break;
+	case SR_CONF_DEVICE_MODE:
+		*data = g_variant_new_string(device_mode_strs[devc->mode]);
+		break;
+	case SR_CONF_PROBE_VDIV:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_uint64(DSL_CH_PRIV(ch)->vdiv);
+		break;
+	case SR_CONF_PROBE_FACTOR:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_uint64(DSL_CH_PRIV(ch)->vfactor);
+		break;
+	case SR_CONF_PROBE_EN:
+		if (!ch)
+			return SR_ERR_ARG;
+		*data = g_variant_new_boolean(ch->enabled);
+		break;
+	case SR_CONF_PROBE_COUPLING:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_string(coupling_strs[DSL_CH_PRIV(ch)->coupling]);
+		break;
+	case SR_CONF_PROBE_OFFSET:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_uint16(DSL_CH_PRIV(ch)->offset);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_byte(devc->trigger_slope);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		*data = g_variant_new_byte(devc->trigger_source & 0x0f);
+		break;
+	case SR_CONF_TRIGGER_CHANNEL:
+		*data = g_variant_new_byte(devc->trigger_source >> 4);
+		break;
+	case SR_CONF_TRIGGER_HOLDOFF:
+		*data = g_variant_new_uint64(devc->trigger_holdoff);
+		break;
+	case SR_CONF_TRIGGER_MARGIN:
+		*data = g_variant_new_byte(devc->trigger_margin);
+		break;
+	case SR_CONF_HORIZ_TRIGGERPOS:
+		if (devc->mode == DSL_MODE_DSO)
+			*data = g_variant_new_byte(devc->trigger_hrate);
+		else
+			*data = g_variant_new_byte(devc->trigger_hpos);
+		break;
+	case SR_CONF_MAX_DSO_SAMPLERATE:
+		*data = g_variant_new_uint64(channel_modes[devc->ch_mode].max_samplerate);
+		break;
+	case SR_CONF_MAX_DSO_SAMPLELIMITS:
+		*data = g_variant_new_uint64(devc->profile->dev_caps.dso_depth);
+		break;
+	case SR_CONF_HW_DEPTH:
+		*data = g_variant_new_uint64(dsl_channel_depth(sdi));
+		break;
+	case SR_CONF_VLD_CH_NUM:
+		*data = g_variant_new_int16(channel_modes[devc->ch_mode].vld_num);
+		break;
+	case SR_CONF_TOTAL_CH_NUM:
+		*data = g_variant_new_int16(devc->profile->dev_caps.total_ch_num);
+		break;
+	case SR_CONF_NUM_HDIV:
+		*data = g_variant_new_int16(10);
+		break;
+	case SR_CONF_NUM_VDIV:
+		*data = g_variant_new_int16(10);
+		break;
+	case SR_CONF_USB_SPEED:
+		*data = g_variant_new_string(
+			devc->profile->usb_speed == LIBUSB_SPEED_SUPER ? "super" : "high");
+		break;
+	case SR_CONF_USB30_SUPPORT:
+		*data = g_variant_new_boolean(
+			(devc->profile->dev_caps.feature_caps & CAPS_FEATURE_USB30) != 0);
+		break;
 	case SR_CONF_VOLTAGE_THRESHOLD:
 		if (!strcmp(devc->profile->model, "DSLogic")) {
-			if ((idx = std_double_tuple_idx_d0(devc->cur_threshold,
+			if ((idx = std_double_tuple_idx_d0(devc->vth,
 					ARRAY_AND_SIZE(thresholds))) < 0)
 				return SR_ERR_BUG;
 			*data = std_gvar_tuple_double(thresholds[idx][0],
 					thresholds[idx][1]);
 		} else {
-			*data = std_gvar_tuple_double(devc->cur_threshold, devc->cur_threshold);
+			*data = std_gvar_tuple_double(devc->vth, devc->vth);
 		}
 		break;
-	case SR_CONF_LIMIT_SAMPLES:
-		*data = g_variant_new_uint64(devc->limit_samples);
+	case SR_CONF_WAIT_UPLOAD:
+		*data = g_variant_new_boolean(FALSE);
 		break;
-	case SR_CONF_SAMPLERATE:
-		*data = g_variant_new_uint64(devc->cur_samplerate);
+	case SR_CONF_BANDWIDTH_LIMIT:
+		*data = g_variant_new_string(bandwidth_strs[devc->bw_limit]);
 		break;
-	case SR_CONF_CAPTURE_RATIO:
-		*data = g_variant_new_uint64(devc->capture_ratio);
+	case SR_CONF_TIMEBASE:
+		*data = g_variant_new_uint64(devc->timebase);
 		break;
-	case SR_CONF_EXTERNAL_CLOCK:
-		*data = g_variant_new_boolean(devc->external_clock);
+	case SR_CONF_INSTANT:
+		*data = g_variant_new_boolean(devc->instant);
 		break;
-	case SR_CONF_CONTINUOUS:
-		*data = g_variant_new_boolean(devc->continuous_mode);
+	case SR_CONF_TRIGGER_VALUE:
+		/* DSO trigger level (per-channel). Returns the software-side trig
+		 * value stored in dsl_channel_priv.trig_value (8-bit). The
+		 * hardware-side value is updated by get_measure() on receive. */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_byte(DSL_CH_PRIV(ch)->trig_value);
 		break;
-	case SR_CONF_CLOCK_EDGE:
-		idx = devc->clock_edge;
-		if (idx >= (int)ARRAY_SIZE(signal_edges))
-			return SR_ERR_BUG;
-		*data = g_variant_new_string(signal_edges[0]);
+	case SR_CONF_PROBE_HW_OFFSET:
+		/* Hardware offset (per-channel). Read-only from GUI's perspective
+		 * in normal operation (updated by get_measure()), but we expose
+		 * SET so the GUI can override during manual calibration. */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_uint16(DSL_CH_PRIV(ch)->hw_offset);
+		break;
+	case SR_CONF_MAX_TIMEBASE:
+		/* Maximum timebase in ns: derived from dso_depth, channel-mode
+		 * num, and min_samplerate across 10 horizontal divisions. */
+		*data = g_variant_new_uint64(
+			UINT64_C(1000000000) * devc->profile->dev_caps.dso_depth /
+			channel_modes[devc->ch_mode].num /
+			channel_modes[devc->ch_mode].min_samplerate / 10);
+		break;
+	case SR_CONF_MIN_TIMEBASE:
+		/* Minimum timebase in ns: 1 / hw_max_samplerate, in ns. */
+		*data = g_variant_new_uint64(
+			UINT64_C(1000000000) / channel_modes[devc->ch_mode].hw_max_samplerate);
+		break;
+	case SR_CONF_REF_MIN:
+		/* ADC reference minimum — compile-time constant from profile. */
+		*data = g_variant_new_uint32(devc->profile->dev_caps.ref_min);
+		break;
+	case SR_CONF_REF_MAX:
+		/* ADC reference maximum — compile-time constant from profile. */
+		*data = g_variant_new_uint32(devc->profile->dev_caps.ref_max);
+		break;
+	case SR_CONF_UNIT_BITS:
+		/* Sample resolution in bits for the current channel mode. */
+		*data = g_variant_new_byte(channel_modes[devc->ch_mode].unit_bits);
+		break;
+	case SR_CONF_PROBE_MAP_DEFAULT:
+		/* Whether the probe uses the default (built-in) mapping. */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_boolean(DSL_CH_PRIV(ch)->map_default);
+		break;
+	case SR_CONF_PROBE_MAP_UNIT:
+		/* Probe mapping unit index (into probe_map_units[]). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_int32(DSL_CH_PRIV(ch)->map_unit);
+		break;
+	case SR_CONF_PROBE_MAP_MIN:
+		/* Probe mapping minimum value (user-defined scale min). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_double(DSL_CH_PRIV(ch)->map_min);
+		break;
+	case SR_CONF_PROBE_MAP_MAX:
+		/* Probe mapping maximum value (user-defined scale max). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		*data = g_variant_new_double(DSL_CH_PRIV(ch)->map_max);
+		break;
+	case SR_CONF_PATTERN_MODE:
+		/* Waveform pattern selection (random/sine/square/sawtooth/triangle).
+		 * For real hardware the device supplies the waveform; this is
+		 * stored for GUI compat (mirrors demo driver behavior). */
+		*data = g_variant_new_string(dso_pattern_strs[devc->pattern_mode]);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -450,65 +1502,376 @@ static int config_get(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+/* ===========================================================================
+ * 8. config_set()
+ * =========================================================================== */
 static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc;
-	int idx;
+	struct sr_channel *ch;
+	int idx, ret = SR_OK;
 	gdouble low, high;
-
-	(void)cg;
+	unsigned int i;
+	int nv;
+	int num_probes;
 
 	if (!sdi)
 		return SR_ERR_ARG;
 
 	devc = sdi->priv;
+	ch = (cg && cg->channels) ? cg->channels->data : NULL;
 
 	switch (key) {
 	case SR_CONF_SAMPLERATE:
-		if ((idx = std_u64_idx(data, devc->samplerates, devc->num_samplerates)) < 0)
+	{
+		unsigned int n = u64_array_count(devc->profile->dev_caps.samplerates);
+		if ((idx = std_u64_idx(data, devc->profile->dev_caps.samplerates, n)) < 0)
 			return SR_ERR_ARG;
-		devc->cur_samplerate = devc->samplerates[idx];
+		devc->cur_samplerate = devc->profile->dev_caps.samplerates[idx];
 		break;
+	}
 	case SR_CONF_LIMIT_SAMPLES:
 		devc->limit_samples = g_variant_get_uint64(data);
 		break;
 	case SR_CONF_CAPTURE_RATIO:
 		devc->capture_ratio = g_variant_get_uint64(data);
 		break;
-	case SR_CONF_VOLTAGE_THRESHOLD:
-		if (!strcmp(devc->profile->model, "DSLogic")) {
-			if ((idx = std_double_tuple_idx(data, ARRAY_AND_SIZE(thresholds))) < 0)
-				return SR_ERR_ARG;
-			devc->cur_threshold = thresholds[idx][0];
-			return dslogic_fpga_firmware_upload(sdi);
-		} else {
-			g_variant_get(data, "(dd)", &low, &high);
-			return dslogic_set_voltage_threshold(sdi, (low + high) / 2.0);
-		}
+	case SR_CONF_CONTINUOUS:
+		devc->continuous_mode = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_EXTERNAL_CLOCK:
 		devc->external_clock = g_variant_get_boolean(data);
 		break;
-	case SR_CONF_CONTINUOUS:
-		devc->continuous_mode = g_variant_get_boolean(data);
+	case SR_CONF_CLOCK_TYPE:
+		devc->clock_type = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_CLOCK_EDGE:
 		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(signal_edges))) < 0)
 			return SR_ERR_ARG;
 		devc->clock_edge = idx;
 		break;
+	case SR_CONF_OPERATION_MODE:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(opmode_strs))) < 0)
+			return SR_ERR_ARG;
+		nv = idx;
+		if (devc->mode == DSL_MODE_LOGIC && devc->op_mode != nv) {
+			if (nv == LO_OP_BUFFER) {
+				devc->op_mode = LO_OP_BUFFER;
+				devc->test_mode = DSL_TEST_NONE;
+				devc->stream = FALSE;
+				for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+					if (channel_modes[i].mode == DSL_MODE_LOGIC &&
+					    channel_modes[i].stream == devc->stream &&
+					    (devc->profile->dev_caps.channels & (1ULL << i))) {
+						devc->ch_mode = channel_modes[i].id;
+						break;
+					}
+				}
+			} else if (nv == LO_OP_STREAM) {
+				devc->op_mode = LO_OP_STREAM;
+				devc->test_mode = DSL_TEST_NONE;
+				devc->stream = TRUE;
+				for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+					if (channel_modes[i].mode == DSL_MODE_LOGIC &&
+					    channel_modes[i].stream == devc->stream &&
+					    (devc->profile->dev_caps.channels & (1ULL << i))) {
+						devc->ch_mode = channel_modes[i].id;
+						break;
+					}
+				}
+			} else if (nv == LO_OP_INTEST) {
+				devc->op_mode = LO_OP_INTEST;
+				devc->test_mode = DSL_TEST_INTERNAL;
+				devc->ch_mode = devc->profile->dev_caps.intest_channel;
+				devc->stream = !(devc->profile->dev_caps.feature_caps & CAPS_FEATURE_BUF);
+			} else {
+				ret = SR_ERR;
+			}
+			dsl_adjust_probes(sdi, channel_modes[devc->ch_mode].num);
+			dsl_adjust_samplerate(devc);
+			if (devc->op_mode == LO_OP_INTEST) {
+				devc->cur_samplerate = devc->stream ?
+					channel_modes[devc->ch_mode].max_samplerate / 10 : SR_MHZ(100);
+				devc->limit_samples = devc->stream ?
+					devc->cur_samplerate * 3 :
+					devc->profile->dev_caps.hw_depth / dsl_en_ch_num(sdi);
+			}
+		}
+		break;
+	case SR_CONF_BUFFER_OPTIONS:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(bufoption_strs))) < 0)
+			return SR_ERR_ARG;
+		nv = idx;
+		if (devc->mode == DSL_MODE_LOGIC &&
+		    (nv == DSL_BUF_STOP || nv == DSL_BUF_UPLOAD))
+			devc->buf_options = nv;
+		break;
+	case SR_CONF_CHANNEL_MODE:
+	{
+		const char *str = g_variant_get_string(data, NULL);
+		if (devc->mode == DSL_MODE_LOGIC) {
+			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+				if ((devc->profile->dev_caps.channels & (1ULL << i)) &&
+				    channel_modes[i].stream == devc->stream &&
+				    !strcmp(str, channel_modes[i].descr)) {
+					devc->ch_mode = channel_modes[i].id;
+					dsl_adjust_probes(sdi, channel_modes[devc->ch_mode].num);
+					dsl_adjust_samplerate(devc);
+					break;
+				}
+			}
+		}
+		break;
+	}
+	case SR_CONF_THRESHOLD:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(threshold_strs))) < 0)
+			return SR_ERR_ARG;
+		nv = idx;
+		if (devc->mode == DSL_MODE_LOGIC && nv != devc->th_level) {
+			devc->th_level = nv;
+			/* dsl_fpga_config() will be called in Phase 3 */
+			sr_warn("FPGA reconfiguration for threshold change "
+				"will be implemented in Phase 3.");
+		}
+		break;
+	case SR_CONF_VTH:
+		devc->vth = g_variant_get_double(data);
+		ret = dslogic_set_voltage_threshold(sdi, devc->vth);
+		break;
+	case SR_CONF_VOLTAGE_THRESHOLD:
+		if (!strcmp(devc->profile->model, "DSLogic")) {
+			if ((idx = std_double_tuple_idx(data, ARRAY_AND_SIZE(thresholds))) < 0)
+				return SR_ERR_ARG;
+			devc->vth = thresholds[idx][0];
+			ret = dslogic_fpga_firmware_upload(sdi);
+		} else {
+			g_variant_get(data, "(dd)", &low, &high);
+			devc->vth = (low + high) / 2.0;
+			ret = dslogic_set_voltage_threshold(sdi, devc->vth);
+		}
+		break;
+	case SR_CONF_FILTER:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(filter_strs))) < 0)
+			return SR_ERR_ARG;
+		devc->filter = idx;
+		break;
+	case SR_CONF_MAX_HEIGHT:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(max_height_strs))) < 0)
+			return SR_ERR_ARG;
+		devc->max_height = idx;
+		break;
+	case SR_CONF_RLE:
+		devc->rle_mode = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_RLE_SUPPORT:
+		devc->rle_support = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_INSTANT:
+		devc->instant = g_variant_get_boolean(data);
+		if (devc->mode == DSL_MODE_DSO && dsl_en_ch_num(sdi) != 0) {
+			if (devc->instant)
+				devc->limit_samples = devc->profile->dev_caps.hw_depth /
+					channel_modes[devc->ch_mode].unit_bits / dsl_en_ch_num(sdi);
+			else
+				devc->limit_samples = devc->profile->dev_caps.dso_depth /
+					dsl_en_ch_num(sdi);
+		}
+		break;
+	case SR_CONF_DEVICE_MODE:
+	{
+		int new_mode = g_variant_get_int16(data);
+		num_probes = 0;
+		devc->mode = new_mode;
+		if (new_mode == DSL_MODE_LOGIC) {
+			dsl_wr_reg(sdi, CTR0_ADDR, bmSCOPE_CLR);
+			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+				if (channel_modes[i].mode == DSL_MODE_LOGIC &&
+				    (devc->profile->dev_caps.channels & (1ULL << i))) {
+					devc->ch_mode = channel_modes[i].id;
+					num_probes = channel_modes[i].num;
+					devc->stream = channel_modes[i].stream;
+					dsl_adjust_samplerate(devc);
+					break;
+				}
+			}
+		} else if (new_mode == DSL_MODE_DSO) {
+			dsl_wr_reg(sdi, CTR0_ADDR, bmSCOPE_SET);
+			dsl_wr_dso(sdi, 0xa5a5a500); /* DSO sync */
+			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+				if (channel_modes[i].mode == DSL_MODE_DSO &&
+				    (devc->profile->dev_caps.channels & (1ULL << i))) {
+					devc->ch_mode = channel_modes[i].id;
+					num_probes = channel_modes[i].num;
+					devc->stream = channel_modes[i].stream;
+					devc->cur_samplerate =
+						channel_modes[i].max_samplerate / num_probes;
+					dsl_adjust_samplerate(devc);
+					break;
+				}
+			}
+			if (num_probes > 0)
+				devc->limit_samples =
+					devc->profile->dev_caps.dso_depth / num_probes;
+		} else if (new_mode == DSL_MODE_ANALOG) {
+			dsl_wr_reg(sdi, CTR0_ADDR, bmSCOPE_SET);
+			dsl_wr_dso(sdi, 0xa5a5a500); /* DSO sync */
+			devc->op_mode = LO_OP_STREAM;
+			devc->test_mode = DSL_TEST_NONE;
+			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+				if (channel_modes[i].mode == DSL_MODE_ANALOG &&
+				    (devc->profile->dev_caps.channels & (1ULL << i))) {
+					devc->ch_mode = channel_modes[i].id;
+					num_probes = channel_modes[i].num;
+					devc->stream = channel_modes[i].stream;
+					dsl_adjust_samplerate(devc);
+					break;
+				}
+			}
+		} else {
+			ret = SR_ERR;
+		}
+		if (num_probes > 0)
+			dsl_setup_probes(sdi, num_probes);
+		break;
+	}
+	case SR_CONF_LOOP_MODE:
+		devc->is_loop = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_STREAM:
+		devc->stream = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_TIMEBASE:
+		devc->timebase = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_PROBE_VDIV:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->vdiv = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_PROBE_FACTOR:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->vfactor = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_PROBE_COUPLING:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->coupling = g_variant_get_byte(data);
+		break;
+	case SR_CONF_PROBE_OFFSET:
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->offset = g_variant_get_uint16(data);
+		break;
+	case SR_CONF_PROBE_EN:
+		if (!ch)
+			return SR_ERR_ARG;
+		ch->enabled = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		devc->trigger_slope = g_variant_get_byte(data);
+		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		devc->trigger_source = (devc->trigger_source & 0xf0) |
+			(g_variant_get_byte(data) & 0x0f);
+		break;
+	case SR_CONF_TRIGGER_CHANNEL:
+		devc->trigger_source = (g_variant_get_byte(data) << 4) |
+			(devc->trigger_source & 0x0f);
+		break;
+	case SR_CONF_TRIGGER_HOLDOFF:
+		devc->trigger_holdoff = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_TRIGGER_MARGIN:
+		devc->trigger_margin = g_variant_get_byte(data);
+		break;
+	case SR_CONF_HORIZ_TRIGGERPOS:
+		if (devc->mode == DSL_MODE_DSO) {
+			devc->trigger_hrate = g_variant_get_byte(data);
+			devc->trigger_hpos = devc->trigger_hrate *
+				dsl_en_ch_num(sdi) * devc->limit_samples / 200.0;
+		} else {
+			devc->trigger_hpos = g_variant_get_byte(data) *
+				devc->limit_samples / 100.0;
+		}
+		break;
+	case SR_CONF_BANDWIDTH_LIMIT:
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(bandwidth_strs))) < 0)
+			return SR_ERR_ARG;
+		nv = idx;
+		devc->bw_limit = nv;
+		if (nv == 0)
+			dsl_wr_reg(sdi, CTR0_ADDR, bmBW20M_CLR);
+		else
+			dsl_wr_reg(sdi, CTR0_ADDR, bmBW20M_SET);
+		break;
+	case SR_CONF_CAPTUREFILE:
+		/* Stored by the session; no device-side action needed. */
+		break;
+	case SR_CONF_TRIGGER_VALUE:
+		/* DSO trigger level (per-channel). 8-bit value stored in
+		 * dsl_channel_priv.trig_value. For real hardware, the actual
+		 * trigger DAC is configured via dsl_wr_dso() in fpga_arm(). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->trig_value = g_variant_get_byte(data);
+		break;
+	case SR_CONF_PROBE_HW_OFFSET:
+		/* Hardware offset (per-channel). Normally auto-updated by
+		 * get_measure() on DSO receive; exposing SET allows manual
+		 * override during calibration/debugging. */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->hw_offset = g_variant_get_uint16(data);
+		break;
+	case SR_CONF_PROBE_MAP_DEFAULT:
+		/* Toggle whether probe uses default (built-in) mapping. */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->map_default = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_PROBE_MAP_UNIT:
+		/* Probe mapping unit (index into probe_map_units[]). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->map_unit = g_variant_get_int32(data);
+		break;
+	case SR_CONF_PROBE_MAP_MIN:
+		/* Probe mapping minimum value (user-defined scale min). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->map_min = g_variant_get_double(data);
+		break;
+	case SR_CONF_PROBE_MAP_MAX:
+		/* Probe mapping maximum value (user-defined scale max). */
+		if (!ch || !ch->priv)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->map_max = g_variant_get_double(data);
+		break;
+	case SR_CONF_PATTERN_MODE:
+		/* Waveform pattern selection (random/sine/square/sawtooth/triangle).
+		 * For real DSLogic hardware the device supplies the waveform —
+		 * stored for GUI compat. Validated against dso_pattern_strs[]. */
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(dso_pattern_strs))) < 0)
+			return SR_ERR_ARG;
+		devc->pattern_mode = (uint8_t)idx;
+		break;
 	default:
 		return SR_ERR_NA;
 	}
 
-	return SR_OK;
+	return ret;
 }
 
+/* ===========================================================================
+ * 9. config_list()
+ * =========================================================================== */
 static int config_list(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct dev_context *devc;
+	unsigned int i;
 
 	devc = (sdi) ? sdi->priv : NULL;
 
@@ -516,6 +1879,22 @@ static int config_list(uint32_t key, GVariant **data,
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
+	case SR_CONF_SAMPLERATE:
+	{
+		GVariantBuilder gvb;
+		GVariant *gvar;
+		unsigned int n;
+		if (!devc || !devc->profile)
+			return SR_ERR_ARG;
+		n = u64_array_count(devc->profile->dev_caps.samplerates);
+		g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+		gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"),
+			devc->profile->dev_caps.samplerates,
+			n * sizeof(uint64_t), TRUE, NULL, NULL);
+		g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
+		*data = g_variant_builder_end(&gvb);
+		break;
+	}
 	case SR_CONF_VOLTAGE_THRESHOLD:
 		if (!devc || !devc->profile)
 			return SR_ERR_ARG;
@@ -524,16 +1903,118 @@ static int config_list(uint32_t key, GVariant **data,
 		else
 			*data = std_gvar_min_max_step_thresholds(0.0, 5.0, 0.1);
 		break;
-	case SR_CONF_SAMPLERATE:
-		if (!devc)
+	case SR_CONF_OPERATION_MODE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(opmode_strs));
+		break;
+	case SR_CONF_BUFFER_OPTIONS:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(bufoption_strs));
+		break;
+	case SR_CONF_CHANNEL_MODE:
+	{
+		GVariantBuilder gvb;
+		if (!devc || !devc->profile)
 			return SR_ERR_ARG;
-		*data = std_gvar_samplerates(devc->samplerates, devc->num_samplerates);
+		g_variant_builder_init(&gvb, G_VARIANT_TYPE("as"));
+		for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
+			if ((devc->profile->dev_caps.channels & (1ULL << i)) &&
+			    channel_modes[i].stream == devc->stream)
+				g_variant_builder_add(&gvb, "s", channel_modes[i].descr);
+		}
+		*data = g_variant_builder_end(&gvb);
+		break;
+	}
+	case SR_CONF_THRESHOLD:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(threshold_strs));
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(filter_strs));
+		break;
+	case SR_CONF_MAX_HEIGHT:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(max_height_strs));
+		break;
+	case SR_CONF_CLOCK_EDGE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(signal_edges));
 		break;
 	case SR_CONF_TRIGGER_MATCH:
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));
 		break;
-	case SR_CONF_CLOCK_EDGE:
-		*data = g_variant_new_strv(ARRAY_AND_SIZE(signal_edges));
+	case SR_CONF_PROBE_COUPLING:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(coupling_strs));
+		break;
+	case SR_CONF_DEVICE_MODE:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(device_mode_strs));
+		break;
+	case SR_CONF_BANDWIDTH_LIMIT:
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(bandwidth_strs));
+		break;
+	case SR_CONF_PROBE_VDIV:
+	{
+		GVariantBuilder gvb;
+		GVariant *gvar;
+		unsigned int n;
+		if (!devc || !devc->profile)
+			return SR_ERR_ARG;
+		n = u64_array_count(devc->profile->dev_caps.vdivs);
+		g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+		gvar = g_variant_new_from_data(G_VARIANT_TYPE("at"),
+			devc->profile->dev_caps.vdivs,
+			n * sizeof(uint64_t), TRUE, NULL, NULL);
+		g_variant_builder_add(&gvb, "{sv}", "vdivs", gvar);
+		*data = g_variant_builder_end(&gvb);
+		break;
+	}
+	case SR_CONF_TIMEBASE:
+		/*
+		 * Build a 1-2-5 timebase ladder from the min timebase
+		 * (based on hw_max_samplerate) to the max timebase
+		 * (based on dso_depth, num channels, min_samplerate, 10 hdivs).
+		 */
+	{
+		GVariantBuilder gvb;
+		uint64_t max_tb, min_tb, tb;
+		if (!devc || !devc->profile)
+			return SR_ERR_ARG;
+		min_tb = UINT64_C(1000000000) / channel_modes[devc->ch_mode].hw_max_samplerate;
+		max_tb = UINT64_C(1000000000) * devc->profile->dev_caps.dso_depth /
+			channel_modes[devc->ch_mode].num /
+			channel_modes[devc->ch_mode].min_samplerate / 10;
+		g_variant_builder_init(&gvb, G_VARIANT_TYPE("at"));
+		tb = min_tb;
+		while (tb <= max_tb) {
+			g_variant_builder_add(&gvb, "t", tb);
+			/* Step through 1-2-5 sequence. */
+			if (tb < 10)
+				tb = 10;
+			else {
+				uint64_t m = tb;
+				while (m >= 10)
+					m /= 10;
+				uint64_t p = tb / m;
+				if (m == 1)
+					tb = 2 * p;
+				else if (m == 2)
+					tb = 5 * p;
+				else
+					tb = 10 * p;
+			}
+		}
+		*data = g_variant_builder_end(&gvb);
+		break;
+	}
+	case SR_CONF_PROBE_MAP_UNIT:
+		/* Probe mapping unit list — mirrors demo driver's dso_map_units[]. */
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(probe_map_units));
+		break;
+	case SR_CONF_PROBE_CONFIGS:
+		/* Returns the list of probe-config keys supported by this driver.
+		 * ProbeOptions binding iterates this list and creates widgets for
+		 * VDIV/COUPLING/MAP_* keys. Applies to both DSO and ANALOG. */
+		*data = std_gvar_array_i32(ARRAY_AND_SIZE(probe_configs));
+		break;
+	case SR_CONF_PATTERN_MODE:
+		/* Waveform pattern list (random/sine/square/sawtooth/triangle).
+		 * Mirrors demo driver's dso_pattern_strs[] for GUI compat. */
+		*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_pattern_strs));
 		break;
 	default:
 		return SR_ERR_NA;
@@ -542,9 +2023,12 @@ static int config_list(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+/* ===========================================================================
+ * 11. Driver registration
+ * =========================================================================== */
 static struct sr_dev_driver dreamsourcelab_dslogic_driver_info = {
 	.name = "dreamsourcelab-dslogic",
-	.longname = "DreamSourceLab DSLogic",
+	.longname = "DreamSourceLab DSLogic/DSCope",
 	.api_version = 1,
 	.init = std_init,
 	.cleanup = std_cleanup,

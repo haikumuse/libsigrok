@@ -351,6 +351,8 @@ src_libdrivers_la_SOURCES += \
 endif
 if HW_DREAMSOURCELAB_DSLOGIC
 src_libdrivers_la_SOURCES += \
+	src/hardware/dreamsourcelab-dslogic/command.h \
+	src/hardware/dreamsourcelab-dslogic/command.c \
 	src/hardware/dreamsourcelab-dslogic/protocol.h \
 	src/hardware/dreamsourcelab-dslogic/protocol.c \
 	src/hardware/dreamsourcelab-dslogic/api.c
