@@ -578,7 +578,16 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_uint64(devc->cur_samplerate);
 		break;
 	case SR_CONF_LIMIT_SAMPLES:
-		*data = g_variant_new_uint64(devc->limit_samples);
+		/* DSO 模式下帧大小固定为 DSO_PACKET_LEN。 */
+		if (devc->device_mode == DEMO_MODE_DSO) {
+			sr_info("demo GET LIMIT_SAMPLES: DSO mode -> DSO_PACKET_LEN=%u",
+			        DSO_PACKET_LEN);
+			*data = g_variant_new_uint64(DSO_PACKET_LEN);
+		} else {
+			sr_info("demo GET LIMIT_SAMPLES: mode=%d -> limit_samples=%" PRIu64,
+			        devc->device_mode, devc->limit_samples);
+			*data = g_variant_new_uint64(devc->limit_samples);
+		}
 		break;
 	case SR_CONF_LIMIT_MSEC:
 		*data = g_variant_new_uint64(devc->limit_msec);

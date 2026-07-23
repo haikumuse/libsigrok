@@ -944,11 +944,22 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 			 * next tick starts a fresh frame (instant mode wraps mid-frame). */
 			if (devc->dso_sent_samples >= DSO_PACKET_LEN)
 				devc->dso_sent_samples = 0;
-			if (!devc->instant && !devc->loop_mode) {
-				/* Single-shot: one full frame, then stop. */
+			/* DSO 连续采集语义（与 DSView 一致）：
+			 *   - instant=TRUE: 单帧滚动采集，发完一帧后停止
+			 *     （应用层 Instant Stop 按钮触发）
+			 *   - instant=FALSE: 持续采集，每 tick 发送一帧刷新波形，
+			 *     不自动停止（应用层 Run/Stop 按钮触发，用户点 Stop 才停）
+			 *
+			 * 原代码在 !instant && !loop_mode 时单帧停止，导致 DSO 模式
+			 * 点 Run/Stop 后只采一帧就停了。DSView 的 demo 驱动在非 instant
+			 * 模式下持续发送帧不停止，由应用层 stop_capture 控制停止。
+			 * loop_mode 逻辑已包含在"非 instant 持续发送"中，无需单独判断。
+			 */
+			if (devc->instant) {
+				/* Instant: single frame, then stop. */
 				sr_dev_acquisition_stop(sdi);
 			}
-			/* Instant/loop: timer stays alive, next tick sends more. */
+			/* Non-instant: timer stays alive, next tick sends next frame. */
 			return G_SOURCE_CONTINUE;
 		}
 	}

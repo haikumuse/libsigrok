@@ -100,7 +100,7 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Horizontal trigger position", NULL},
 	{SR_CONF_BUFFERSIZE, SR_T_UINT64, "buffersize",
 		"Buffer size", NULL},
-	{SR_CONF_TIMEBASE, SR_T_RATIONAL_PERIOD, "timebase",
+	{SR_CONF_TIMEBASE, SR_T_UINT64, "timebase",
 		"Time base", NULL},
 	{SR_CONF_FILTER, SR_T_BOOL, "filter",
 		"Filter", NULL},
