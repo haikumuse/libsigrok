@@ -204,12 +204,14 @@ static const uint64_t dso_vdivs[] = {
 	SR_mV(200), SR_mV(500), SR_V(1), SR_V(2),
 };
 
-/* DSO coupling modes. 类型必须为 uint8_t: ProbeOptions::bind_coupling 期望
- * LIST 返回 {"coupling": [uint8...]} (G_VARIANT_TYPE("y")), 且 print_coupling
- * 用 g_variant_get(gvar, "y", ...) 读取。旧代码声明为 int32_t[] 导致
- * g_variant_new_fixed_array 只拷贝前 3 字节 (ARRAY_SIZE*sizeof(uint8_t)=3),
- * 小端序 int32{0,1,2} 的前 3 字节全为 0 → 3 个 GND。 */
-static const uint8_t dso_couplings[] = { 0 /*GND*/, 1 /*DC*/, 2 /*AC*/ };
+/* DSO/analog coupling modes. MUST be int32_t to match sr_key_info_config
+ * SR_T_INT32 for SR_CONF_PROBE_COUPLING. Using uint8_t caused
+ * sr_variant_type_check to reject SET calls (expected "i", got "y") →
+ * coupling changes silently lost. The static_assert below enforces this at
+ * compile time so a future edit cannot reintroduce the bug. */
+static const int32_t dso_couplings[] = { 0 /*GND*/, 1 /*DC*/, 2 /*AC*/ };
+_Static_assert(sizeof(dso_couplings[0]) == sizeof(int32_t),
+	"dso_couplings must be int32_t to match SR_T_INT32 for SR_CONF_PROBE_COUPLING");
 
 /* DSO timebase list (ns). */
 static const uint64_t dso_timebases[] = {
@@ -786,16 +788,14 @@ static int config_get(uint32_t key, GVariant **data,
 				*data = g_variant_new_uint64(devc->analog_vdiv[aidx]);
 			break;
 		case SR_CONF_PROBE_COUPLING:
-			/* 返回 byte ("y") 而非 int32 ("i"): ProbeOptions::print_coupling
-			 * 用 g_variant_get(gvar,"y",...) 读取, Enum::get_widget 用
-			 * g_variant_compare(list_byte, get_byte) 匹配当前值。
-			 * 旧代码返回 int32 导致类型不匹配 → setCurrentIndex 永不触发
-			 * → 下拉框始终停在 index 0 (第一个 GND)。 */
-			if (is_dso)
-				*data = g_variant_new_byte(devc->dso_coupling[idx]);
-			else
-				*data = g_variant_new_byte(devc->analog_coupling[aidx]);
-			break;
+		/* 返回 int32 ("i") 以匹配 sr_key_info_config SR_T_INT32。
+		 * sr_variant_type_check 在 SET 时验证类型, byte 会被拒绝。
+		 * ProbeOptions::print_coupling 改用 g_variant_get(gvar,"i",...)。 */
+		if (is_dso)
+			*data = g_variant_new_int32((int32_t)devc->dso_coupling[idx]);
+		else
+			*data = g_variant_new_int32((int32_t)devc->analog_coupling[aidx]);
+		break;
 		case SR_CONF_TRIGGER_VALUE:
 			if (!is_dso) return SR_ERR_ARG;
 			*data = g_variant_new_int32((int32_t)devc->dso_trig_value[idx]);
@@ -847,6 +847,38 @@ static int config_get(uint32_t key, GVariant **data,
 	}
 	default:
 		return SR_ERR_NA;
+	}
+
+	return SR_OK;
+}
+
+/* Type-check helper for config_set entry points. Verifies the GVariant type
+ * matches the expected type string (e.g. "i" for int32, "t" for uint64).
+ * sr_variant_type_check in hwdriver.c already validates types before the
+ * driver's config_set runs, but this provides a driver-level diagnostic
+ * with the key name and expected/actual types for immediate identification
+ * of type mismatches during development. Returns SR_OK on match, SR_ERR_ARG
+ * on mismatch. */
+static int demo_check_gvar_type(uint32_t key, GVariant *data,
+	const char *expected_type)
+{
+	const GVariantType *actual;
+
+	if (!data || !expected_type)
+		return SR_ERR_ARG;
+
+	actual = g_variant_get_type(data);
+	if (!actual) {
+		sr_err("demo: config_set key %u: GVariant has no type", key);
+		return SR_ERR_ARG;
+	}
+
+	if (!g_variant_type_equal(actual, G_VARIANT_TYPE(expected_type))) {
+		gchar *actual_str = g_variant_type_dup_string(actual);
+		sr_err("demo: config_set key %u: type mismatch — expected '%s', got '%s'",
+			key, expected_type, actual_str);
+		g_free(actual_str);
+		return SR_ERR_ARG;
 	}
 
 	return SR_OK;
@@ -1122,14 +1154,20 @@ static int config_set(uint32_t key, GVariant *data,
 				devc->analog_vdiv[aidx] = g_variant_get_uint64(data);
 			break;
 		case SR_CONF_PROBE_COUPLING:
-			/* 用 g_variant_get_byte 而非 g_variant_get_int32:
-			 * Enum::commit() 发送的 GVariant 来自 LIST 项 (byte 类型 "y"),
-			 * g_variant_get_int32 对 byte 变体返回 0 → SET 静默失败。 */
+		/* PROBE_COUPLING expects int32 ("i") per sr_key_info_config SR_T_INT32.
+		 * demo_check_gvar_type provides a driver-level diagnostic if the type
+		 * is wrong (sr_variant_type_check in hwdriver.c should catch it first,
+		 * but this gives an immediate driver-context error message). */
+		if (demo_check_gvar_type(key, data, "i") != SR_OK)
+			return SR_ERR_ARG;
+		{
+			int32_t cv = g_variant_get_int32(data);
 			if (is_dso)
-				devc->dso_coupling[idx] = g_variant_get_byte(data);
+				devc->dso_coupling[idx] = (uint8_t)cv;
 			else
-				devc->analog_coupling[aidx] = g_variant_get_byte(data);
-			break;
+				devc->analog_coupling[aidx] = (uint8_t)cv;
+		}
+		break;
 		case SR_CONF_TRIGGER_VALUE:
 			if (!is_dso) return SR_ERR_ARG;
 			devc->dso_trig_value[idx] = (uint8_t)g_variant_get_int32(data);
@@ -1241,17 +1279,18 @@ static int config_list(uint32_t key, GVariant **data,
 			}
 			break;
 		case SR_CONF_PROBE_COUPLING:
-			/* Return dict {"coupling": [uint8...]} — ProbeOptions binding
-			 * extracts via g_variant_lookup_value("coupling"). */
-			{
-				GVariantBuilder gvb;
-				g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
-				GVariant *gv = g_variant_new_fixed_array(G_VARIANT_TYPE("y"),
-					dso_couplings, ARRAY_SIZE(dso_couplings), sizeof(uint8_t));
-				g_variant_builder_add(&gvb, "{sv}", "coupling", gv);
-				*data = g_variant_builder_end(&gvb);
-			}
-			break;
+		/* Return dict {"coupling": [int32...]} — ProbeOptions binding
+		 * extracts via g_variant_lookup_value("coupling"). int32 matches
+		 * sr_key_info_config SR_T_INT32 so SET passes type check. */
+		{
+			GVariantBuilder gvb;
+			g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+			GVariant *gv = g_variant_new_fixed_array(G_VARIANT_TYPE("i"),
+				dso_couplings, ARRAY_SIZE(dso_couplings), sizeof(int32_t));
+			g_variant_builder_add(&gvb, "{sv}", "coupling", gv);
+			*data = g_variant_builder_end(&gvb);
+		}
+		break;
 		case SR_CONF_PROBE_MAP_UNIT:
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
 			break;
@@ -1305,17 +1344,17 @@ static int config_list(uint32_t key, GVariant **data,
 			}
 			break;
 		case SR_CONF_PROBE_COUPLING:
-			/* COUPLING applies to both DSO and ANALOG (DAQ) channels.
-			 * Return dict {"coupling": [uint8...]} for ProbeOptions. */
-			if (ch->type != SR_CHANNEL_DSO && ch->type != SR_CHANNEL_ANALOG)
-				return SR_ERR_ARG;
-			{
-				GVariantBuilder gvb;
-				g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
-				GVariant *gv = g_variant_new_fixed_array(G_VARIANT_TYPE("y"),
-					dso_couplings, ARRAY_SIZE(dso_couplings), sizeof(uint8_t));
-				g_variant_builder_add(&gvb, "{sv}", "coupling", gv);
-				*data = g_variant_builder_end(&gvb);
+		/* COUPLING applies to both DSO and ANALOG (DAQ) channels.
+		 * Return dict {"coupling": [int32...]} for ProbeOptions. */
+		if (ch->type != SR_CHANNEL_DSO && ch->type != SR_CHANNEL_ANALOG)
+			return SR_ERR_ARG;
+		{
+			GVariantBuilder gvb;
+			g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+			GVariant *gv = g_variant_new_fixed_array(G_VARIANT_TYPE("i"),
+				dso_couplings, ARRAY_SIZE(dso_couplings), sizeof(int32_t));
+			g_variant_builder_add(&gvb, "{sv}", "coupling", gv);
+			*data = g_variant_builder_end(&gvb);
 			}
 			break;
 		case SR_CONF_PROBE_MAP_UNIT:

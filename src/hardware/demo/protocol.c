@@ -429,6 +429,9 @@ static void apply_analog_coupling(struct analog_gen *ag,
 
 	coupling = devc->analog_coupling[aidx];
 
+	sr_warn("apply_analog_coupling: ch->index=%d aidx=%d coupling=%u count=%u",
+		ag->ch->index, aidx, (unsigned)coupling, count);
+
 	if (coupling == 1 /* SR_DC_COUPLING */)
 		return;  /* DC: 直通, 无处理 */
 
@@ -569,6 +572,8 @@ static void send_analog_packet(struct analog_gen *ag,
 				&& aidx_coupling < DSO_MAX_CHANNELS)
 			? devc->analog_coupling[aidx_coupling] : 1 /* DC */;
 		gboolean need_coupling = (cur_coupling != 1 /* DC */);
+		sr_warn("send_analog_packet: ch->index=%d aidx_coupling=%d cur_coupling=%u need_coupling=%d avg=%d",
+			ag->ch->index, aidx_coupling, (unsigned)cur_coupling, (int)need_coupling, (int)devc->avg);
 		if (ag->amplitude != DEFAULT_ANALOG_AMPLITUDE ||
 			ag->offset != DEFAULT_ANALOG_OFFSET ||
 			ag->pattern == PATTERN_ANALOG_RANDOM || need_coupling) {
