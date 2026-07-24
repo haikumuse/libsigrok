@@ -338,9 +338,9 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Maximum timebase", NULL},
 	{SR_CONF_MIN_TIMEBASE, SR_T_UINT64, "min_timebase",
 		"Minimum timebase", NULL},
-	{SR_CONF_PROBE_OFFSET, SR_T_UINT64, "probe_offset",
+	{SR_CONF_PROBE_OFFSET, SR_T_UINT16, "probe_offset",
 		"Probe offset", NULL},
-	{SR_CONF_PROBE_HW_OFFSET, SR_T_UINT64, "probe_hw_offset",
+	{SR_CONF_PROBE_HW_OFFSET, SR_T_UINT16, "probe_hw_offset",
 		"Probe hardware offset", NULL},
 	{SR_CONF_PROBE_MAP_DEFAULT, SR_T_BOOL, "probe_map_default",
 		"Probe map default", NULL},
@@ -524,6 +524,14 @@ SR_PRIV const GVariantType *sr_variant_type_get(int datatype)
 		return G_VARIANT_TYPE_DICTIONARY;
 	case SR_T_MQ:
 		return G_VARIANT_TYPE_TUPLE;
+	case SR_T_UINT8:
+		return G_VARIANT_TYPE_BYTE;
+	case SR_T_INT16:
+		return G_VARIANT_TYPE_INT16;
+	case SR_T_CHAR:
+		return G_VARIANT_TYPE_STRING;
+	case SR_T_UINT16:
+		return G_VARIANT_TYPE_UINT16;
 	default:
 		return NULL;
 	}
