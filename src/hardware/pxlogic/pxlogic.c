@@ -714,8 +714,14 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
      *      more resilient).
      * Data acquisition uses 4 concurrent transfers on endpoint 0x82, but
      * with aligned BUFSIZE buffers it performs adequately without RAW_IO.
-     * On Linux/macOS libusb_set_raw_io_default is a no-op. */
+     * libusb_set_raw_io_default is a fork-only API (event-abstraction-v4),
+     * only available when building against the internal libusb submodule
+     * (HAVE_LIBUSB_OS_HANDLE). On Linux/macOS CI the system libusb lacks
+     * this symbol, so the call is guarded out — it is a WinUSB-specific
+     * policy tweak with no effect on Linux/macOS backends anyway. */
+#ifdef HAVE_LIBUSB_OS_HANDLE
     libusb_set_raw_io_default(usb->devhdl, 0);
+#endif
 
     if ((ret = libusb_claim_interface(usb->devhdl, USB_INTERFACE_C)) < 0) {
         sr_err("Failed to claim interface C: %s.", libusb_error_name(ret));
@@ -731,9 +737,11 @@ static int hw_usb_open(struct sr_dev_driver *drv, struct sr_dev_inst *sdi, gbool
         return SR_ERR;
     }
 
-    /* RAW_IO already disabled via libusb_set_raw_io_default() before claim.
-     * No per-endpoint libusb_set_raw_io() calls needed — endpoints started
-     * with RAW_IO=FALSE (WinUSB native default). */
+    /* On Windows (HAVE_LIBUSB_OS_HANDLE), RAW_IO was already disabled via
+     * libusb_set_raw_io_default() before claim — endpoints start with
+     * RAW_IO=FALSE (WinUSB native default), so no per-endpoint
+     * libusb_set_raw_io() calls are needed. On Linux/macOS this guard is
+     * a no-op: those backends default to RAW_IO=FALSE anyway. */
 
     if (usb->address == 0xff) {
         usb->address = libusb_get_device_address(dev_handel);
