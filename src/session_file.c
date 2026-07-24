@@ -305,6 +305,10 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 			gboolean probe_zero_based = g_key_file_has_key(kf,
 					sections[i], "probe0", NULL);
 
+			/* Detect PXView 0-based analog naming (analog0 vs upstream analog1) */
+			gboolean analog_zero_based = g_key_file_has_key(kf,
+					sections[i], "analog0", NULL);
+
 			for (j = 0; keys[j]; j++) {
 				if (!strcmp(keys[j], "samplerate")) {
 					val = g_key_file_get_string(kf, sections[i],
@@ -405,8 +409,30 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 					g_free(val);
 					sr_dev_channel_enable(ch, TRUE);
 				} else if (!strncmp(keys[j], "analog", 6)) {
-					tmp_u64 = g_ascii_strtoull(keys[j]+6, NULL, 10);
-					if (!sdi || tmp_u64 == 0 || tmp_u64 > G_MAXINT) {
+				tmp_u64 = g_ascii_strtoull(keys[j]+6, NULL, 10);
+				if (!sdi || tmp_u64 > G_MAXINT) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				/* PXView 0-based: analog0 = first analog channel.
+				 * Upstream 1-based: analog1 = first analog channel
+				 * (looks for ch->index == 0, which is a logic channel —
+				 * upstream bug, but we keep compat for 1-based files). */
+				if (analog_zero_based) {
+					/* 0-based: analog<N> → N-th analog channel,
+					 * which has index total_channels + N */
+					ch = NULL;
+					int analog_idx = total_channels + (int)tmp_u64;
+					for (l = sdi->channels; l; l = l->next) {
+						ch = l->data;
+						if ((guint64)ch->index == (guint64)analog_idx)
+							break;
+						else
+							ch = NULL;
+					}
+				} else {
+					/* 1-based upstream: analog<N> → ch->index == N-1 */
+					if (tmp_u64 == 0) {
 						ret = SR_ERR_DATA;
 						break;
 					}
@@ -418,21 +444,22 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 						else
 							ch = NULL;
 					}
-					if (!ch) {
-						ret = SR_ERR_DATA;
-						break;
-					}
-					val = g_key_file_get_string(kf, sections[i],
-							keys[j], &error);
-					if (!val) {
-						ret = SR_ERR_DATA;
-						break;
-					}
-					/* sr_session_save() */
-					sr_dev_channel_name_set(ch, val);
-					g_free(val);
-					sr_dev_channel_enable(ch, TRUE);
 				}
+				if (!ch) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				val = g_key_file_get_string(kf, sections[i],
+						keys[j], &error);
+				if (!val) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				/* sr_session_save() */
+				sr_dev_channel_name_set(ch, val);
+				g_free(val);
+				sr_dev_channel_enable(ch, TRUE);
+			}
 			}
 			g_strfreev(keys);
 

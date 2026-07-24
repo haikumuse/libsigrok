@@ -53,6 +53,13 @@ struct session_vdev {
 	/* PXView v3 format: per-channel chunked data (L-<ch>/<block>) */
 	gboolean pxv_format;
 	int pxv_cur_block;
+	/* MSO 架构修复：analog 数据流式读取支持。
+	 * pxv_phase: 0=logic, 1=analog (logic 块读完后切换到 analog) */
+	int pxv_phase;
+	int pxv_cur_analog_block;
+	/* analog 数据格式：从 header 的 "analog bytes"/"analog float" 键解析 */
+	int analog_unit_bytes;
+	gboolean analog_is_float;
 };
 
 static const uint32_t devopts[] = {
@@ -65,13 +72,13 @@ static const uint32_t devopts[] = {
 };
 
 /*
- * Stream PXView v3 format data: per-channel chunked (L-<ch>/<block>).
+ * Stream PXView v3 logic data: per-channel chunked (L-<ch>/<block>).
  * Each chunk contains a single channel's bitmap (1 bit per sample, LSB-first
  * within each byte). This function reads all channels' chunks for a given
  * block number, interleaves them into upstream unitsize-packed format, and
  * sends SR_DF_LOGIC packets.
  */
-static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
+static gboolean stream_pxv_logic_data(struct sr_dev_inst *sdi)
 {
 	struct session_vdev *vdev;
 	struct sr_datafeed_packet packet;
@@ -200,6 +207,137 @@ static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
 
 	vdev->pxv_cur_block++;
 	return got_data;
+}
+
+/*
+ * MSO 架构修复：Stream PXView v3 analog data: interleaved multi-channel
+ * chunks (A-0/<block>). 每个块包含所有 enabled analog 通道的 interleaved
+ * 数据：[s0_ch0][s0_ch1]...[s1_ch0][s1_ch1]...
+ * 读取后构造 SR_DF_ANALOG 包，包含所有 analog 通道。
+ */
+static gboolean stream_pxv_analog_data(struct sr_dev_inst *sdi)
+{
+	struct session_vdev *vdev;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_analog analog;
+	struct sr_analog_encoding encoding;
+	struct sr_analog_meaning meaning;
+	struct sr_analog_spec spec;
+	struct zip_stat zs;
+	char chunkname[32];
+	struct zip_file *zf;
+	struct sr_channel *ch_struct;
+	GSList *ch_list;
+	GSList *analog_ch_list = NULL;
+	int analog_count = 0;
+	int unit_bytes;
+	uint8_t *buf;
+
+	vdev = sdi->priv;
+
+	/* 无 analog 通道或未配置格式 → 结束 */
+	if (vdev->num_analog_channels <= 0)
+		return FALSE;
+
+	unit_bytes = vdev->analog_unit_bytes;
+	if (unit_bytes <= 0) {
+		/* 默认 float (4 bytes)，匹配上游 sigrok 约定 */
+		unit_bytes = 4;
+		sr_warn("analog_unit_bytes not set, assuming float (4 bytes).");
+	}
+
+	/* 收集所有 enabled analog 通道 */
+	for (ch_list = sdi->channels; ch_list; ch_list = ch_list->next) {
+		ch_struct = ch_list->data;
+		if (ch_struct->type == SR_CHANNEL_ANALOG && ch_struct->enabled) {
+			analog_ch_list = g_slist_append(analog_ch_list, ch_struct);
+			analog_count++;
+		}
+	}
+	if (analog_count <= 0) {
+		return FALSE;
+	}
+
+	/* 读取 A-0/<block> 块（interleaved 多通道数据） */
+	snprintf(chunkname, sizeof(chunkname), "A-0/%d",
+			vdev->pxv_cur_analog_block);
+	if (zip_stat(vdev->archive, chunkname, 0, &zs) < 0)
+		return FALSE;  /* 无更多 analog 块 → 完成 */
+
+	buf = g_malloc(zs.size);
+	zf = zip_fopen(vdev->archive, chunkname, 0);
+	if (!zf) {
+		g_free(buf);
+		g_slist_free(analog_ch_list);
+		return FALSE;
+	}
+	if (zip_fread(zf, buf, zs.size) != (int)zs.size) {
+		sr_warn("Short read on %s.", chunkname);
+		g_free(buf);
+		g_slist_free(analog_ch_list);
+		zip_fclose(zf);
+		vdev->pxv_cur_analog_block++;
+		return TRUE;
+	}
+	zip_fclose(zf);
+
+	/* 构造 SR_DF_ANALOG 包 */
+	int bytes_per_sample = unit_bytes * analog_count;
+	uint64_t num_samples = zs.size / bytes_per_sample;
+
+	packet.type = SR_DF_ANALOG;
+	packet.payload = &analog;
+	sr_analog_init(&analog, &encoding, &meaning, &spec, 2);
+	/* sr_analog_init 默认 unitsize=sizeof(float), is_float=FALSE。
+	 * 需根据实际数据格式设置，否则 AnalogSnapshot 会错误解读数据。 */
+	encoding.unitsize = unit_bytes;
+	encoding.is_float = vdev->analog_is_float;
+	encoding.is_signed = TRUE;
+	encoding.is_bigendian = FALSE;
+	analog.meaning->channels = analog_ch_list;
+	analog.num_samples = num_samples;
+	analog.meaning->mq = SR_MQ_VOLTAGE;
+	analog.meaning->unit = SR_UNIT_VOLT;
+	analog.meaning->mqflags = SR_MQFLAG_DC;
+	analog.data = buf;
+
+	vdev->bytes_read += zs.size;
+	sr_session_send(sdi, &packet);
+
+	/* analog_ch_list 被 sr_session_send 消费后释放（归 sr_datafeed_analog 所有权） */
+	/* buf 归 sr_datafeed_analog 所有权，由接收方释放 */
+	/* 但实际 libsigrok 的 packet 发送是同步拷贝，需自行释放 */
+	g_free(buf);
+	g_slist_free(analog_ch_list);
+
+	vdev->pxv_cur_analog_block++;
+	return TRUE;
+}
+
+/*
+ * PXView v3 流式读取分派器：先读 logic 块（L-<ch>/<block>），
+ * logic 块读完后切换到 analog 块（A-0/<block>）。
+ */
+static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
+{
+	struct session_vdev *vdev = sdi->priv;
+
+	/* Phase 0: 读取 logic 块 */
+	if (vdev->pxv_phase == 0) {
+		gboolean got = stream_pxv_logic_data(sdi);
+		if (got)
+			return TRUE;
+		/* logic 块读完，切换到 analog 阶段 */
+		vdev->pxv_phase = 1;
+		vdev->pxv_cur_analog_block = 0;
+	}
+
+	/* Phase 1: 读取 analog 块 */
+	if (vdev->pxv_phase == 1) {
+		return stream_pxv_analog_data(sdi);
+	}
+
+	return FALSE;
 }
 
 static gboolean stream_session_data(struct sr_dev_inst *sdi)
@@ -505,13 +643,19 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		return SR_ERR;
 	}
 
-	/* Detect PXView v3 format: per-channel chunks L-<ch>/<block> */
+	/* Detect PXView v3 format: per-channel chunks L-<ch>/<block> or A-<ch>/<block> */
 	{
 		struct zip_stat zs;
 		struct sr_channel *ch_tmp;
 		GSList *l;
 		vdev->pxv_format = FALSE;
 		vdev->pxv_cur_block = 0;
+		vdev->pxv_phase = 0;
+		vdev->pxv_cur_analog_block = 0;
+		vdev->analog_unit_bytes = 0;
+		vdev->analog_is_float = FALSE;
+
+		/* Check for logic chunks (L-<ch>/0) */
 		for (l = sdi->channels; l; l = l->next) {
 			ch_tmp = l->data;
 			if (ch_tmp->type == SR_CHANNEL_LOGIC && ch_tmp->enabled) {
@@ -521,9 +665,55 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 				if (zip_stat(vdev->archive, tmp_name, 0, &zs) >= 0) {
 					vdev->pxv_format = TRUE;
 					sr_info("Detected PXView v3 per-channel "
-						"chunked format.");
+						"chunked format (logic).");
 				}
 				break;
+			}
+		}
+
+		/* MSO 架构修复：也检测 analog 块 (A-0/0)。
+		 * 纯 analog 文件（无 logic 块）也走 v3 路径。 */
+		if (!vdev->pxv_format) {
+			struct zip_stat azs;
+			if (zip_stat(vdev->archive, "A-0/0", 0, &azs) >= 0) {
+				vdev->pxv_format = TRUE;
+				sr_info("Detected PXView v3 per-channel "
+					"chunked format (analog).");
+			}
+		}
+
+		/* MSO 架构修复：从 header 内文件解析 analog 数据格式。
+		 * 读取 "analog bytes" 和 "analog float" 键。 */
+		if (vdev->pxv_format && vdev->num_analog_channels > 0) {
+			struct zip_stat hzs;
+			if (zip_stat(vdev->archive, "header", 0, &hzs) >= 0) {
+				struct zip_file *hf = zip_fopen(vdev->archive, "header", 0);
+				if (hf) {
+					char *hbuf = g_malloc(hzs.size + 1);
+					gint64 nread = zip_fread(hf, hbuf, hzs.size);
+					zip_fclose(hf);
+					if (nread > 0) {
+						hbuf[nread] = '\0';
+						GKeyFile *kf = g_key_file_new();
+						if (g_key_file_load_from_data(kf, hbuf, nread,
+									G_KEY_FILE_NONE, NULL)) {
+							gint abytes = g_key_file_get_integer(kf,
+								"header", "analog bytes", NULL);
+						if (abytes > 0 && abytes <= 8) {
+							vdev->analog_unit_bytes = abytes;
+							/* 显式读取 analog float 键 */
+							gint afloat = g_key_file_get_integer(kf,
+									"header", "analog float", NULL);
+							vdev->analog_is_float = (afloat == 1);
+							sr_info("PXView v3 analog format: "
+								"%d bytes/sample, float=%d",
+								abytes, vdev->analog_is_float);
+						}
+							g_key_file_free(kf);
+						}
+					}
+					g_free(hbuf);
+				}
 			}
 		}
 	}
