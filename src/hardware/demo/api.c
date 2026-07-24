@@ -837,13 +837,22 @@ static int config_get(uint32_t key, GVariant **data,
 			*data = g_variant_new_int32((int32_t)devc->dso_trig_value[idx]);
 			break;
 		case SR_CONF_PROBE_OFFSET:
-			if (!is_dso) return SR_ERR_ARG;
-			*data = g_variant_new_uint16(devc->dso_offset[idx]);
+		/* ANALOG (DAQ) has no hardware offset — return 0 (consistent with
+		 * config_set accepting-but-ignoring for ANALOG). */
+		if (!is_dso) {
+			*data = g_variant_new_uint16(0);
 			break;
-		case SR_CONF_PROBE_HW_OFFSET:
-			if (!is_dso) return SR_ERR_ARG;
-			*data = g_variant_new_uint16(devc->dso_hw_offset[idx]);
+		}
+		*data = g_variant_new_uint16(devc->dso_offset[idx]);
+		break;
+	case SR_CONF_PROBE_HW_OFFSET:
+		/* ANALOG (DAQ) has no hardware offset — return 0. */
+		if (!is_dso) {
+			*data = g_variant_new_uint16(0);
 			break;
+		}
+		*data = g_variant_new_uint16(devc->dso_hw_offset[idx]);
+		break;
 		case SR_CONF_PROBE_FACTOR:
 			/* DSO uses dso_vfactor[]; ANALOG (DAQ) returns fixed 1x. */
 			if (is_dso)
@@ -1209,15 +1218,21 @@ static int config_set(uint32_t key, GVariant *data,
 			devc->dso_trig_value[idx] = (uint8_t)g_variant_get_int32(data);
 			break;
 		case SR_CONF_PROBE_OFFSET:
-			if (!is_dso) return SR_ERR_ARG;
-			devc->dso_offset[idx] = g_variant_get_uint16(data);
-			/* Trigger DSO waveform regeneration (offset affects vertical shift). */
-			devc->dso_offset_change = TRUE;
-			break;
-		case SR_CONF_PROBE_HW_OFFSET:
-			if (!is_dso) return SR_ERR_ARG;
-			devc->dso_hw_offset[idx] = g_variant_get_uint16(data);
-			break;
+		/* DSO stores dso_offset[] + triggers regeneration; ANALOG (DAQ) has
+		 * no hardware offset concept — accept but ignore (consistent with
+		 * PROBE_MAP_UNIT/MIN/MAX). Without this, AnalogSignal::set_zero_ratio
+		 * and commit_settings() would log SR_ERR_ARG warnings for every
+		 * ANALOG channel on every drag. */
+		if (!is_dso) break;
+		devc->dso_offset[idx] = g_variant_get_uint16(data);
+		/* Trigger DSO waveform regeneration (offset affects vertical shift). */
+		devc->dso_offset_change = TRUE;
+		break;
+	case SR_CONF_PROBE_HW_OFFSET:
+		/* DSO stores dso_hw_offset[]; ANALOG accepts but ignores. */
+		if (!is_dso) break;
+		devc->dso_hw_offset[idx] = g_variant_get_uint16(data);
+		break;
 		case SR_CONF_PROBE_FACTOR:
 			/* DSO uses dso_vfactor[]; ANALOG (DAQ) accepts but ignores
 			 * (no per-channel factor state stored for analog). */
