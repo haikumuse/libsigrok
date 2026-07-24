@@ -462,6 +462,69 @@ static void apply_analog_coupling(struct analog_gen *ag,
 	/* 未知耦合值, 按 DC 处理 (直通)。 */
 }
 
+/*
+ * 对 DSO 样本施加耦合效果。与 apply_analog_coupling 行为一致, 但针对
+ * DSO 的 byte-interleaved 缓冲区布局 [ch0_s0, ch1_s0, ch0_s1, ...] 操作。
+ *
+ * DSO 样本是 8-bit (0..255), 中心值 mid=128 (DSO_SAMPLE_BITS/2 对应的 ADC
+ * 中点)。各耦合模式:
+ *   GND (0): 样本强制为 mid (基线), 观察零点
+ *   DC  (1): 直通
+ *   AC  (2): 一阶 RC 高通 (去除直流分量), 围绕 mid 振荡
+ *
+ * 注意: 此函数必须在 demo_dso_vdiv_scale() 之后调用 (vdiv 缩放改变样本幅度,
+ * 耦合应在最终样本值上应用)。每通道 AC 滤波状态保存在
+ * devc->dso_ac_prev_input/output, 跨包连续。
+ */
+static void apply_dso_coupling(struct dev_context *devc, uint8_t *data,
+		uint64_t sample_count, uint8_t en_ch_num)
+{
+	const uint8_t mid = 128;
+	const float a = DEMO_AC_COUPLING_TAU / (DEMO_AC_COUPLING_TAU + 1.0f);
+
+	if (!devc || !data || en_ch_num == 0)
+		return;
+
+	for (uint8_t ch = 0; ch < en_ch_num && ch < DSO_MAX_CHANNELS; ch++) {
+		uint8_t coupling = devc->dso_coupling[ch];
+
+		if (coupling == 1 /* SR_DC_COUPLING */)
+			continue;  /* DC: 直通 */
+
+		if (coupling == 0 /* SR_GND_COUPLING */) {
+			/* GND: 强制所有样本为 mid (基线)。 */
+			for (uint64_t i = 0; i < sample_count; i++)
+				data[i * en_ch_num + ch] = mid;
+			/* 重置 AC 滤波器状态避免切换后跳变。 */
+			devc->dso_ac_prev_input[ch] = 0.0f;
+			devc->dso_ac_prev_output[ch] = 0.0f;
+			continue;
+		}
+
+		if (coupling == 2 /* SR_AC_COUPLING */) {
+			/* 一阶 RC 高通: 对 (x - mid) 做高通, 输出加回 mid。
+			 * y' = a*(y'[n-1] + (x-mid) - (x_prev-mid))
+			 * y  = y' + mid */
+			float prev_in = devc->dso_ac_prev_input[ch];
+			float prev_out = devc->dso_ac_prev_output[ch];
+			for (uint64_t i = 0; i < sample_count; i++) {
+				float x = (float)data[i * en_ch_num + ch] - mid;
+				float y = a * (prev_out + x - prev_in);
+				int v = (int)(y + mid + 0.5f);
+				if (v < 0) v = 0;
+				if (v > 255) v = 255;
+				data[i * en_ch_num + ch] = (uint8_t)v;
+				prev_in = x;
+				prev_out = y;
+			}
+			devc->dso_ac_prev_input[ch] = prev_in;
+			devc->dso_ac_prev_output[ch] = prev_out;
+			continue;
+		}
+		/* 未知耦合值, 按 DC 处理 (直通)。 */
+	}
+}
+
 static void send_analog_packet(struct analog_gen *ag,
 		struct sr_dev_inst *sdi, uint64_t *analog_sent,
 		uint64_t analog_pos, uint64_t analog_todo)
@@ -851,6 +914,28 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 	 * interleaved [ch0_s0, ch1_s0, ch0_s1, ...] so ch_idx = i % 2. */
 	demo_dso_vdiv_scale(devc, devc->dso_buf, dso.packet_len);
 
+	/* Apply per-channel coupling (GND/DC/AC) on the final scaled samples.
+	 * Without this, switching DSO coupling from DC to GND in the header
+	 * had no visible effect — the waveform kept showing the live signal
+	 * instead of collapsing to the mid baseline. ANALOG channels already
+	 * had this via apply_analog_coupling(); DSO was missing it. */
+	apply_dso_coupling(devc, devc->dso_buf, sending_samples, en_ch_num);
+
+	/* Diagnostic: log factor/coupling state every ~50 frames to verify
+	 * config changes reach the driver. Remove after debugging. */
+	{
+		static int _dso_cfg_dbg = 0;
+		if ((++_dso_cfg_dbg % 20) == 0) {
+			sr_warn("[DSO-CFG] vf[0]=%llu vf[1]=%llu coup[0]=%u coup[1]=%u "
+			       "en[0]=%d en[1]=%d amp=%u",
+			       (unsigned long long)devc->dso_vfactor[0],
+			       (unsigned long long)devc->dso_vfactor[1],
+			       devc->dso_coupling[0], devc->dso_coupling[1],
+			       (int)devc->dso_enabled[0], (int)devc->dso_enabled[1],
+			       amp);
+		}
+	}
+
 	packet.type = SR_DF_DSO;
 	packet.payload = &dso;
 	sr_session_send(sdi, &packet);
@@ -912,7 +997,7 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		devc->limit_samples, devc->limit_msec,
 		devc->sent_samples, devc->spent_us,
 		devc->cur_samplerate, devc->num_logic_channels,
-		devc->num_analog_channels, devc->num_dso_channels,
+		devc->num_analog_channels, (size_t)devc->num_dso_channels,
 		devc->enabled_logic_channels, devc->enabled_analog_channels);
 
 	/*

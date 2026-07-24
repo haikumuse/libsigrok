@@ -321,6 +321,12 @@ struct dev_context {
 	uint8_t dso_coupling[DSO_MAX_CHANNELS];
 	uint8_t dso_trig_value[DSO_MAX_CHANNELS];
 	gboolean dso_enabled[DSO_MAX_CHANNELS];
+	/* DSO AC 耦合高通滤波器状态 (per-channel, 跨包连续)。
+	 * 一阶 RC 高通: y[n] = a*(y[n-1] + x[n] - x[n-1])。
+	 * 仅在 dso_coupling[ch]==AC 时使用; GND/DC 不需要。
+	 * devc 由 g_malloc0 分配, 初始为 0 (等价于 prev_in=prev_out=0)。 */
+	float dso_ac_prev_input[DSO_MAX_CHANNELS];
+	float dso_ac_prev_output[DSO_MAX_CHANNELS];
 	/* DSO data buffer */
 	uint8_t *dso_buf;
 	uint64_t dso_sent_samples;

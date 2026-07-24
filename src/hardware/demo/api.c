@@ -577,18 +577,45 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_SAMPLERATE:
 		*data = g_variant_new_uint64(devc->cur_samplerate);
 		break;
-	case SR_CONF_LIMIT_SAMPLES:
-		/* DSO 模式下帧大小固定为 DSO_PACKET_LEN。 */
-		if (devc->device_mode == DEMO_MODE_DSO) {
-			sr_info("demo GET LIMIT_SAMPLES: DSO mode -> DSO_PACKET_LEN=%u",
-			        DSO_PACKET_LEN);
-			*data = g_variant_new_uint64(DSO_PACKET_LEN);
-		} else {
-			sr_info("demo GET LIMIT_SAMPLES: mode=%d -> limit_samples=%" PRIu64,
-			        devc->device_mode, devc->limit_samples);
-			*data = g_variant_new_uint64(devc->limit_samples);
+	case SR_CONF_LIMIT_SAMPLES: {
+		/* 纯 DSO 模式下帧大小固定为 DSO_PACKET_LEN（demo_send_dso_packet 每帧
+		 * 发送 DSO_PACKET_LEN 样本）。返回帧大小而非 devc->limit_samples，
+		 * 让前端 get_sample_limit()/cur_samplelimits 返回正确的帧大小，
+		 * 使 cur_snap_sampletime = 帧时间，get_max_offset 基于帧时间计算
+		 * offset 范围。这与 DSView DSL 硬件驱动 DSO 模式下强制
+		 * limit_samples = dso_depth/num_channels（帧大小）的做法一致。
+		 *
+		 * 但在 MSO 模式（DSO + logic/analog 同时启用）下，analog/logic 通道
+		 * 按 devc->limit_samples 发送样本。若此处仍返回 DSO_PACKET_LEN，
+		 * AnalogSnapshot 的 _total_sample_count 会小于实际接收的样本数，
+		 * 导致 ring buffer 回绕后 _sample_count 变成回绕余数（如 32），
+		 * envelope 仅计算极少样本，模拟波形无法显示。
+		 *
+		 * 注意：不能用 devc->device_mode 判断，因为 PXView 的 set_work_mode
+		 * 对非 DSL 设备（demo/file）不调 SR_CONF_DEVICE_MODE SET，所以
+		 * devc->device_mode 永远是默认 DEMO_MODE_LOGIC。改用检查是否有
+		 * enabled DSO channel 来判断当前是否 DSO 模式（SigSession::
+		 * switch_work_mode 切换模式时会 enable 对应类型通道）。 */
+		gboolean dso_active = FALSE;
+		gboolean other_active = FALSE;
+		for (GSList *l = sdi->channels; l; l = l->next) {
+			struct sr_channel *ch = l->data;
+			if (!ch->enabled)
+				continue;
+			if (ch->type == SR_CHANNEL_DSO)
+				dso_active = TRUE;
+			else
+				other_active = TRUE;
 		}
+		/* 仅纯 DSO 模式（DSO 是唯一启用的通道类型）返回 DSO_PACKET_LEN。
+		 * MSO 模式（DSO + logic/analog）返回 limit_samples，让 analog/logic
+		 * snapshot 的 ring buffer 大小匹配实际发送的样本数。 */
+		if (dso_active && !other_active)
+			*data = g_variant_new_uint64(DSO_PACKET_LEN);
+		else
+			*data = g_variant_new_uint64(devc->limit_samples);
 		break;
+	}
 	case SR_CONF_LIMIT_MSEC:
 		*data = g_variant_new_uint64(devc->limit_msec);
 		break;
@@ -1462,7 +1489,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		devc->cur_samplerate, devc->limit_samples, devc->limit_msec,
 		devc->limit_frames, devc->capture_ratio,
 		devc->num_logic_channels, devc->num_analog_channels,
-		devc->num_dso_channels,
+		(size_t)devc->num_dso_channels,
 		devc->enabled_logic_channels, devc->enabled_analog_channels,
 		(void*)devc->stl, devc->logic_unitsize);
 
