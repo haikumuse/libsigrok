@@ -966,7 +966,12 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         *data = g_variant_new_uint64(devc->limit_msec);
         break;
     case SR_CONF_DEVICE_MODE:
-        *data = g_variant_new_int16(devc->mode);
+        /* Return int32 (not int16) so DeviceAgent::get_config_int32 can
+         * read via g_variant_get_int32 without a GLib-CRITICAL type
+         * assertion. The set side (config_set below) still reads int16,
+         * matching DSLogic/demo drivers and the view layer's
+         * set_config_int16 — the get/set paths use independent types. */
+        *data = g_variant_new_int32(devc->mode);
         break;
     case SR_CONF_CAPTURE_RATIO:
         /* Trigger position as 0..100 percent. Mirrors scilogic api.c. */
