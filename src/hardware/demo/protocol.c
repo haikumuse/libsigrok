@@ -988,7 +988,9 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 
 	static int _demo_tick_count = 0;
 	_demo_tick_count++;
-	sr_info("demo_prepare_data TICK #%d: stl=%p, trigger_fired=%d, "
+	/* Reduced to sr_dbg: with 25ms tick interval this fires 40x/sec,
+	 * sr_info would flood the log. */
+	sr_dbg("demo_prepare_data TICK #%d: stl=%p, trigger_fired=%d, "
 		"limit_samples=%" PRIu64 ", limit_msec=%" PRIu64 ", "
 		"sent_samples=%" PRIu64 ", spent_us=%" PRId64 ", "
 		"cur_samplerate=%" PRIu64 ", num_logic=%zu, num_analog=%zu, "
@@ -1080,7 +1082,7 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 			samples_todo = devc->limit_samples - devc->sent_samples;
 	}
 
-	sr_info("demo_prepare_data: elapsed_us=%" PRId64 ", limit_us=%" PRId64
+	sr_dbg("demo_prepare_data: elapsed_us=%" PRId64 ", limit_us=%" PRId64
 		", todo_us=%" PRId64 ", samples_todo=%" PRIu64,
 		elapsed_us, limit_us, todo_us, samples_todo);
 
@@ -1122,21 +1124,22 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 			 * std_session_send_df_trigger inside soft_trigger_logic_check).
 			 * In Buffer mode it gates data emission until fire. */
 			if (devc->stl && (!devc->trigger_fired)) {
-				sr_info("demo trigger check: sending_now=%" PRIu64
-					", logic_unitsize=%zu, data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x"
-					", stl->count=%d, op_mode=%d",
-					sending_now, devc->logic_unitsize,
-					devc->logic_data[0], devc->logic_data[1],
-					devc->logic_data[2], devc->logic_data[3],
-					devc->logic_data[4], devc->logic_data[5],
-					devc->logic_data[6], devc->logic_data[7],
-					devc->stl->count, devc->op_mode);
+			/* Per-tick trigger check log — sr_dbg to avoid flooding at 25ms ticks. */
+			sr_dbg("demo trigger check: sending_now=%" PRIu64
+				", logic_unitsize=%zu, data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x"
+				", stl->count=%d, op_mode=%d",
+				sending_now, devc->logic_unitsize,
+				devc->logic_data[0], devc->logic_data[1],
+				devc->logic_data[2], devc->logic_data[3],
+				devc->logic_data[4], devc->logic_data[5],
+				devc->logic_data[6], devc->logic_data[7],
+				devc->stl->count, devc->op_mode);
 				trigger_offset = soft_trigger_logic_check(devc->stl,
 						devc->logic_data, sending_now * devc->logic_unitsize,
 						&pre_trigger_samples);
-				sr_info("demo trigger check: soft_trigger_logic_check returned %d"
-					", pre_trigger_samples=%d",
-					(int)trigger_offset, pre_trigger_samples);
+			sr_dbg("demo trigger check: soft_trigger_logic_check returned %d"
+				", pre_trigger_samples=%d",
+				(int)trigger_offset, pre_trigger_samples);
 				if (trigger_offset > -1) {
 					devc->trigger_fired = TRUE;
 					sr_info("demo trigger FIRED at offset %d (op_mode=%d)",

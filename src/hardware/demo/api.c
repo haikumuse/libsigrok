@@ -101,10 +101,19 @@ static const uint32_t devopts[] = {
 	/* Loop capture toggle. capturemanager.cpp:197 calls set_config_bool. When
 	 * TRUE, dev_acquisition_stop re-arms acquisition instead of finalizing. */
 	SR_CONF_LOOP_MODE | SR_CONF_GET | SR_CONF_SET,
-	/* Logic channel-mode selection (string). deviceoptions.cpp/mainwindow.cpp/
-	 * session_service.cpp call get/set_config_string. config_list returns the
-	 * 4 mode strings; logic_adjust_samplerate() clamps cur_samplerate on set. */
-	SR_CONF_CHANNEL_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* SR_CONF_CHANNEL_MODE removed: the demo device has a FIXED 8 logic
+	 * channels (DEFAULT_NUM_LOGIC_CHANNELS) and does NOT implement dynamic
+	 * channel-count switching. The old mode strings ("Use 16/12/6/3 Channels
+	 * (Max xxxMHz)") were copied from the PXLogic fork and were misleading —
+	 * they implied the demo device could use 16 channels, which it cannot.
+	 * Removing this key from devopts causes check_key() in hwdriver.c to
+	 * reject get/set/list calls, so DeviceOptionsDock gets NULL from
+	 * get_config_list() and skips the channel-mode radio-button group. */
+	/* Logic pattern mode (sigrok/random/incremental/...). Device-level (cg=NULL)
+	 * access so the DeviceOptionsDock Mode section shows a pattern dropdown.
+	 * DeviceAgent::get_demo_operation_mode() reads this to detect pattern
+	 * changes; set_session() writes it to restore saved state. */
+	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	/* Probe config key list (for ProbeOptions binding — DAQ/DSO map_*). */
 	SR_CONF_PROBE_CONFIGS | SR_CONF_LIST,
 	/* Per-channel probe keys also advertised at device level so upstream
@@ -113,6 +122,14 @@ static const uint32_t devopts[] = {
 	 * guard; upstream 0.6.0 requires the key appear in devopts. */
 	SR_CONF_PROBE_VDIV | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_COUPLING | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* PROBE_OFFSET / PROBE_HW_OFFSET advertised at device level so
+	 * DeviceAgent::get_config's fork-only-key pre-check (which queries
+	 * device-level devopts with cg=NULL) accepts GET calls. Without this,
+	 * get_probe_offset/get_probe_hw_offset silently return false for ALL
+	 * channels (DSO and ANALOG), causing DsoSignal/AnalogSignal to fall
+	 * back to mid-range defaults instead of reading the driver value. */
+	SR_CONF_PROBE_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_HW_OFFSET | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
@@ -158,6 +175,14 @@ static const uint32_t devopts_cg_analog_channel[] = {
 	/* DAQ probe controls (coupling / vdiv / scale mapping). */
 	SR_CONF_PROBE_VDIV | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_COUPLING | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	/* PROBE_OFFSET / PROBE_HW_OFFSET: ANALOG (DAQ) channels have no hardware
+	 * offset, but AnalogSignal::set_zero_ratio and SignalModel::set_zero_offset
+	 * / set_hw_offset unconditionally call set_config_uint16 for these keys.
+	 * Without them in devopts_cg_analog_channel, hwdriver.c check_key() rejects
+	 * with SR_ERR_ARG before the driver's config_set can accept-and-ignore.
+	 * config_set returns 0 for ANALOG; config_get returns 0 for ANALOG. */
+	SR_CONF_PROBE_OFFSET | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PROBE_HW_OFFSET | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_DEFAULT | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_PROBE_MAP_UNIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_PROBE_MAP_MIN | SR_CONF_GET | SR_CONF_SET,
@@ -647,8 +672,14 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_tuple(mq_arr, 2);
 		break;
 	case SR_CONF_PATTERN_MODE:
-		if (!cg)
-			return SR_ERR_CHANNEL_GROUP;
+		if (!cg) {
+			/* Device-level query: return the current logic pattern.
+			 * Used by DeviceAgent::get_demo_operation_mode() and the
+			 * DeviceOptionsDock property binding (bind_enum). */
+			*data = g_variant_new_string(
+				logic_pattern_str[devc->logic_pattern]);
+			break;
+		}
 		/* Any channel in the group will do. */
 		ch = cg->channels->data;
 		if (ch->type == SR_CHANNEL_LOGIC) {
@@ -991,8 +1022,23 @@ static int config_set(uint32_t key, GVariant *data,
 		}
 		break;
 	case SR_CONF_PATTERN_MODE:
-		if (!cg)
-			return SR_ERR_CHANNEL_GROUP;
+		if (!cg) {
+			/* Device-level set: set the logic pattern. Used by
+			 * DeviceOptionsDock property binding and set_session()
+			 * restore path. */
+			logic_pattern = std_str_idx(data,
+				ARRAY_AND_SIZE(logic_pattern_str));
+			if (logic_pattern < 0)
+				return SR_ERR_ARG;
+			sr_dbg("Setting logic pattern to %s",
+					logic_pattern_str[logic_pattern]);
+			devc->logic_pattern = logic_pattern;
+			if (logic_pattern == PATTERN_ALL_LOW)
+				memset(devc->logic_data, 0x00, LOGIC_BUFSIZE);
+			else if (logic_pattern == PATTERN_ALL_HIGH)
+				memset(devc->logic_data, 0xff, LOGIC_BUFSIZE);
+			break;
+		}
 		logic_pattern = std_str_idx(data, ARRAY_AND_SIZE(logic_pattern_str));
 		analog_pattern = std_str_idx(data, ARRAY_AND_SIZE(analog_pattern_str));
 		{
@@ -1345,6 +1391,11 @@ static int config_list(uint32_t key, GVariant **data,
 		case SR_CONF_PROBE_MAP_UNIT:
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
 			break;
+		case SR_CONF_PATTERN_MODE:
+			/* Device-level: return logic pattern strings for the demo
+			 * pattern dropdown in DeviceOptionsDock Mode section. */
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(logic_pattern_str));
+			break;
 		default:
 			return SR_ERR_NA;
 		}
@@ -1508,9 +1559,16 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		devc->enabled_logic_channels, devc->enabled_analog_channels,
 		(void*)devc->stl, devc->logic_unitsize);
 
-	int _src_ret = sr_session_source_add(sdi->session, -1, 0, 100,
+	/* Tick interval for demo_prepare_data. 25ms = 40 packets/sec gives
+	 * smooth progress-bar updates (the old 100ms = 10 FPS looked
+	 * stuttery). samples_todo is derived from real elapsed time via
+	 * g_get_monotonic_time(), so shorter ticks just produce smaller,
+	 * more frequent batches — no data-integrity impact. */
+	const int demo_tick_ms = 25;
+	int _src_ret = sr_session_source_add(sdi->session, -1, 0, demo_tick_ms,
 			demo_prepare_data, (struct sr_dev_inst *)sdi);
-	sr_info("demo dev_acquisition_start: sr_session_source_add returned %d", _src_ret);
+	sr_info("demo dev_acquisition_start: sr_session_source_add returned %d (tick=%dms)",
+		_src_ret, demo_tick_ms);
 
 	std_session_send_df_header(sdi);
 
