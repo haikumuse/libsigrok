@@ -922,11 +922,12 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 	apply_dso_coupling(devc, devc->dso_buf, sending_samples, en_ch_num);
 
 	/* Diagnostic: log factor/coupling state every ~50 frames to verify
-	 * config changes reach the driver. Remove after debugging. */
+	 * config changes reach the driver. Downgraded to sr_dbg to avoid
+	 * log I/O overhead on the data thread during continuous DSO capture. */
 	{
 		static int _dso_cfg_dbg = 0;
-		if ((++_dso_cfg_dbg % 20) == 0) {
-			sr_warn("[DSO-CFG] vf[0]=%llu vf[1]=%llu coup[0]=%u coup[1]=%u "
+		if ((++_dso_cfg_dbg % 50) == 0) {
+			sr_dbg("[DSO-CFG] vf[0]=%llu vf[1]=%llu coup[0]=%u coup[1]=%u "
 			       "en[0]=%d en[1]=%d amp=%u",
 			       (unsigned long long)devc->dso_vfactor[0],
 			       (unsigned long long)devc->dso_vfactor[1],
