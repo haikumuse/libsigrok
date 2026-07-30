@@ -60,6 +60,11 @@ struct session_vdev {
 	/* analog 数据格式：从 header 的 "analog bytes"/"analog float" 键解析 */
 	int analog_unit_bytes;
 	gboolean analog_is_float;
+	/* PXView device mode (LOGIC=0, DSO=1, ANALOG=2, MSO=3).
+	 * Parsed from header "device mode" key by session_file.c.
+	 * Exposed via SR_CONF_DEVICE_MODE so PXView can restore the
+	 * correct work mode when opening a .pxl file. */
+	int pxv_device_mode;
 };
 
 static const uint32_t devopts[] = {
@@ -69,6 +74,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_NUM_ANALOG_CHANNELS | SR_CONF_SET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SESSIONFILE | SR_CONF_SET,
+	SR_CONF_DEVICE_MODE | SR_CONF_GET | SR_CONF_SET,
 };
 
 /*
@@ -561,6 +567,9 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_CAPTURE_UNITSIZE:
 		*data = g_variant_new_uint64(vdev->unitsize);
 		break;
+	case SR_CONF_DEVICE_MODE:
+		*data = g_variant_new_int16((int16_t)vdev->pxv_device_mode);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -600,6 +609,14 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_NUM_ANALOG_CHANNELS:
 		vdev->num_analog_channels = g_variant_get_int32(data);
+		break;
+	case SR_CONF_DEVICE_MODE:
+		/* Store PXView device mode (LOGIC=0, DSO=1, ANALOG=2, MSO=3).
+		 * Set by session_file.c when parsing the header "device mode" key.
+		 * Uses int16 to match the SR_T_INT16 type registered in hwdriver.c
+		 * and the int16 variant passed by session_file.c / DeviceAgent. */
+		vdev->pxv_device_mode = g_variant_get_int16(data);
+		sr_info("Setting PXView device mode to %d.", vdev->pxv_device_mode);
 		break;
 	default:
 		return SR_ERR_NA;

@@ -309,8 +309,20 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 			gboolean analog_zero_based = g_key_file_has_key(kf,
 					sections[i], "analog0", NULL);
 
-			for (j = 0; keys[j]; j++) {
-				if (!strcmp(keys[j], "samplerate")) {
+		for (j = 0; keys[j]; j++) {
+			if (!strcmp(keys[j], "device mode")) {
+				/* PXView writes "device mode = N" (LOGIC=0, DSO=1,
+				 * ANALOG=2, MSO=3) so the file can be reopened in
+				 * the correct work mode. Forward to session_driver
+				 * via sr_config_set (int16 matches the key type
+				 * registered in hwdriver.c). */
+				int dev_mode = g_key_file_get_integer(kf, sections[i],
+						keys[j], &error);
+				if (sdi && !error && dev_mode >= 0)
+					sr_config_set(sdi, NULL, SR_CONF_DEVICE_MODE,
+							g_variant_new_int16((int16_t)dev_mode));
+				g_clear_error(&error);
+			} else if (!strcmp(keys[j], "samplerate")) {
 					val = g_key_file_get_string(kf, sections[i],
 							keys[j], &error);
 					if (!sdi || !val || sr_parse_sizestring(val,
@@ -367,7 +379,7 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 						sr_channel_new(sdi, k, SR_CHANNEL_ANALOG,
 								FALSE, channelname);
 					}
-				} else if (!strncmp(keys[j], "probe", 5)) {
+				} else if (!strncmp(keys[j], "probe", 5) && g_ascii_isdigit(keys[j][5])) {
 				tmp_u64 = g_ascii_strtoull(keys[j] + 5, NULL, 10);
 				if (!sdi || tmp_u64 > G_MAXINT) {
 					ret = SR_ERR_DATA;
@@ -408,7 +420,8 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 					sr_dev_channel_name_set(ch, val);
 					g_free(val);
 					sr_dev_channel_enable(ch, TRUE);
-				} else if (!strncmp(keys[j], "analog", 6)) {
+				/* Only match analog<N> (N is a digit), not "analog bytes"/"analog float". */
+			} else if (!strncmp(keys[j], "analog", 6) && g_ascii_isdigit(keys[j][6])) {
 				tmp_u64 = g_ascii_strtoull(keys[j]+6, NULL, 10);
 				if (!sdi || tmp_u64 > G_MAXINT) {
 					ret = SR_ERR_DATA;

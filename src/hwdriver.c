@@ -248,7 +248,17 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Continuous sampling", NULL},
 	{SR_CONF_DATALOG, SR_T_BOOL, "datalog",
 		"Datalog", NULL},
-	{SR_CONF_DEVICE_MODE, SR_T_STRING, "device_mode",
+	/* SR_CONF_DEVICE_MODE: registered as SR_T_INT16 to match the actual
+	 * GVariant types used by all drivers in this codebase:
+	 *   - demo/api.c:      config_get → int16, config_set → get_int16
+	 *   - pxlogic.c:       config_get → int32, config_set → get_int16
+	 *   - dslogic/api.c:   config_get → string, config_set → get_int16
+	 *   - session_driver:  config_get → int16, config_set → get_int16
+	 * The upstream sigrok registered this as SR_T_STRING, but PXView's
+	 * fork drivers all use integer variants for set. Using SR_T_INT16
+	 * lets sr_variant_type_check() accept int16/int32 (subtype) on the
+	 * set path. The get path is not type-checked by sr_config_get(). */
+	{SR_CONF_DEVICE_MODE, SR_T_INT16, "device_mode",
 		"Device mode", NULL},
 	{SR_CONF_TEST_MODE, SR_T_STRING, "test_mode",
 		"Test mode", NULL},
