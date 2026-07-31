@@ -127,22 +127,22 @@ enum demo_dso_pattern {
 	DEMO_DSO_PATTERN_TRIANGLE,
 };
 
-/* Logic channel-mode identifiers (mirrors old fork demo.h).
- * Each mode trades channel count for max samplerate. Selected via
- * SR_CONF_CHANNEL_MODE (string config). The numeric ID is the bit-pattern
- * used by old fork demo; the index is the 0-based position in logic_channel_modes[]. */
+/* Logic channel-mode identifiers. Mirrors pxlogic's buffer-mode channel
+ * modes so the demo device can simulate real hardware channel-count /
+ * samplerate tradeoffs. The numeric ID is stored in devc->logic_ch_mode;
+ * the index is the 0-based position in logic_channel_modes[]. */
 enum demo_logic_channel_id {
-	DEMO_LOGIC125x16 = 16,
-	DEMO_LOGIC250x12 = 17,
-	DEMO_LOGIC500x6 = 18,
-	DEMO_LOGIC1000x3 = 19,
+	DEMO_LOGIC250x32 = 32,
+	DEMO_LOGIC250x16 = 33,
+	DEMO_LOGIC500x16 = 34,
+	DEMO_LOGIC1000x8 = 35,
 };
 
 enum demo_logic_channel_index {
-	LOGIC125x16 = 0,
-	LOGIC250x12 = 1,
-	LOGIC500x6 = 2,
-	LOGIC1000x3 = 3,
+	LOGIC250x32 = 0,
+	LOGIC250x16 = 1,
+	LOGIC500x16 = 2,
+	LOGIC1000x8 = 3,
 };
 
 /* Operation mode — mirrors pxlogic's OP_BUFFER/OP_STREAM so the same
@@ -221,7 +221,7 @@ struct demo_dso_measure {
 #define DEFAULT_LOGIC_FILE		"protocol"
 #define DEFAULT_DSO_FILE		"sine"
 #define DEFAULT_ANALOG_FILE		"sine"
-#define MAX_PROBE_NUM			16
+#define MAX_PROBE_NUM			32
 
 /* Pattern mode descriptor: a list of .demo file names (without .demo suffix).
  * Index 0 is always "random" (DEMO_GEN_RANDOM); subsequent entries are files

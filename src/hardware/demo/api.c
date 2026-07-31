@@ -29,7 +29,7 @@
 #include "libsigrok-internal.h"
 #include "protocol.h"
 
-#define DEFAULT_NUM_LOGIC_CHANNELS		8
+#define DEFAULT_NUM_LOGIC_CHANNELS		32
 #define DEFAULT_LOGIC_PATTERN			PATTERN_SIGROK
 
 #define DEFAULT_NUM_ANALOG_CHANNELS		5
@@ -101,14 +101,11 @@ static const uint32_t devopts[] = {
 	/* Loop capture toggle. capturemanager.cpp:197 calls set_config_bool. When
 	 * TRUE, dev_acquisition_stop re-arms acquisition instead of finalizing. */
 	SR_CONF_LOOP_MODE | SR_CONF_GET | SR_CONF_SET,
-	/* SR_CONF_CHANNEL_MODE removed: the demo device has a FIXED 8 logic
-	 * channels (DEFAULT_NUM_LOGIC_CHANNELS) and does NOT implement dynamic
-	 * channel-count switching. The old mode strings ("Use 16/12/6/3 Channels
-	 * (Max xxxMHz)") were copied from the PXLogic fork and were misleading —
-	 * they implied the demo device could use 16 channels, which it cannot.
-	 * Removing this key from devopts causes check_key() in hwdriver.c to
-	 * reject get/set/list calls, so DeviceOptionsDock gets NULL from
-	 * get_config_list() and skips the channel-mode radio-button group. */
+	/* Logic channel mode: selects channel count / max samplerate tradeoff.
+	 * Mirrors pxlogic's SR_CONF_CHANNEL_MODE so the DeviceOptionsDock builds
+	 * the same radio-button group. config_set enables/disables channels based
+	 * on the selected mode's num_channels. */
+	SR_CONF_CHANNEL_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	/* Logic pattern mode (sigrok/random/incremental/...). Device-level (cg=NULL)
 	 * access so the DeviceOptionsDock Mode section shows a pattern dropdown.
 	 * DeviceAgent::get_demo_operation_mode() reads this to detect pattern
@@ -285,20 +282,24 @@ struct demo_logic_channel_mode {
 	uint64_t max_samplerate;
 	const char *descr;
 };
+/* Logic channel-mode descriptor table. Mirrors pxlogic's buffer-mode
+ * channel modes so the demo device can simulate real hardware tradeoffs
+ * between channel count and max samplerate. SR_CONF_CHANNEL_MODE (string
+ * config) selects among these. */
 static const struct demo_logic_channel_mode logic_channel_modes[] = {
-	{ DEMO_LOGIC125x16,  LOGIC125x16,  16, SR_MHZ(125), "Use 16 Channels (Max 125MHz)" },
-	{ DEMO_LOGIC250x12,  LOGIC250x12,  12, SR_MHZ(250), "Use 12 Channels (Max 250MHz)" },
-	{ DEMO_LOGIC500x6,   LOGIC500x6,    6, SR_MHZ(500), "Use 6 Channels (Max 500MHz)"  },
-	{ DEMO_LOGIC1000x3,  LOGIC1000x3,   3, SR_GHZ(1),   "Use 3 Channels (Max 1GHz)"   },
+	{ DEMO_LOGIC250x32,  LOGIC250x32,  32, SR_MHZ(250), "Use 32 Channels (Max 250MHz)" },
+	{ DEMO_LOGIC250x16,  LOGIC250x16,  16, SR_MHZ(250), "Use 16 Channels (Max 250MHz)" },
+	{ DEMO_LOGIC500x16,  LOGIC500x16,  16, SR_MHZ(500), "Use 16 Channels (Max 500MHz)" },
+	{ DEMO_LOGIC1000x8,  LOGIC1000x8,   8, SR_GHZ(1),   "Use 8 Channels (Max 1000MHz)" },
 };
 
 /* String array view of logic_channel_modes[].descr for std_str_idx validation
  * in config_set and g_variant_new_strv in config_list. */
 static const char *logic_channel_mode_strs[ARRAY_SIZE(logic_channel_modes)] = {
-	[LOGIC125x16]  = "Use 16 Channels (Max 125MHz)",
-	[LOGIC250x12]  = "Use 12 Channels (Max 250MHz)",
-	[LOGIC500x6]   = "Use 6 Channels (Max 500MHz)",
-	[LOGIC1000x3]  = "Use 3 Channels (Max 1GHz)",
+	[LOGIC250x32]  = "Use 32 Channels (Max 250MHz)",
+	[LOGIC250x16]  = "Use 16 Channels (Max 250MHz)",
+	[LOGIC500x16]  = "Use 16 Channels (Max 500MHz)",
+	[LOGIC1000x8]  = "Use 8 Channels (Max 1000MHz)",
 };
 
 /* Probe config keys exposed via SR_CONF_PROBE_CONFIGS for ProbeOptions
@@ -407,11 +408,12 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->dso_timebase_change = FALSE;
 	devc->instant = FALSE;
 	devc->loop_mode = FALSE;
-	/* Logic channel-mode default: 16ch@125M (widest channel count). The GUI
-	 * shows a radio-button group built from SR_CONF_CHANNEL_MODE config_list;
-	 * user can switch to 12ch/6ch/3ch for higher max samplerate. */
-	devc->logic_ch_mode = DEMO_LOGIC125x16;
-	devc->logic_ch_mode_index = LOGIC125x16;
+	/* Logic channel-mode default: 32ch@250M (widest channel count, mirrors
+	 * pxlogic's BUFFER_LOGIC250x32 default). The GUI shows a radio-button
+	 * group built from SR_CONF_CHANNEL_MODE config_list; user can switch to
+	 * 16ch@250M / 16ch@500M / 8ch@1G for higher max samplerate. */
+	devc->logic_ch_mode = DEMO_LOGIC250x32;
+	devc->logic_ch_mode_index = LOGIC250x32;
 	/* Analog random cyclic buffer (allocated lazily by init_analog_random_data
 	 * when PATTERN_ANALOG_RANDOM is first selected on an ANALOG channel). */
 	devc->analog_random_buf = NULL;
@@ -1181,7 +1183,9 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_CHANNEL_MODE: {
 		/* Logic channel-mode selection (string). Validate via std_str_idx
 		 * against logic_channel_mode_strs[]; set index + id, then clamp
-		 * cur_samplerate to the mode's max via logic_adjust_samplerate(). */
+		 * cur_samplerate to the mode's max via logic_adjust_samplerate().
+		 * Also enable/disable logic channels based on the mode's num_channels
+		 * so the GUI reflects the active channel count (mirrors pxlogic). */
 		int idx = std_str_idx(data, ARRAY_AND_SIZE(logic_channel_mode_strs));
 		if (idx < 0)
 			return SR_ERR_ARG;
@@ -1189,6 +1193,16 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->logic_ch_mode = logic_channel_modes[idx].id;
 		sr_info("demo: set CHANNEL_MODE='%s' (index=%d)",
 		        logic_channel_modes[idx].descr, idx);
+		/* Enable/disable logic channels based on mode's channel count. */
+		uint16_t mode_channels = logic_channel_modes[idx].num_channels;
+		int ch_idx = 0;
+		for (GSList *l = sdi->channels; l; l = l->next) {
+			struct sr_channel *ch = l->data;
+			if (ch->type == SR_CHANNEL_LOGIC) {
+				ch->enabled = (ch_idx < mode_channels);
+				ch_idx++;
+			}
+		}
 		logic_adjust_samplerate(devc);
 		break;
 	}
