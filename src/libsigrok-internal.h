@@ -1770,8 +1770,7 @@ struct sr_dev_inst {
 	struct sr_session *session;
 };
 
-/* Generic device instances */
-SR_PRIV void sr_dev_inst_free(struct sr_dev_inst *sdi);
+/* Generic device instances — sr_dev_inst_free is now public (proto.h) */
 
 #ifdef HAVE_LIBUSB_1_0
 /* USB-specific instances */
@@ -1819,7 +1818,14 @@ SR_PRIV void sr_usbtmc_dev_inst_free(struct sr_usbtmc_dev_inst *usbtmc);
 /*--- hwdriver.c ------------------------------------------------------------*/
 
 SR_PRIV const GVariantType *sr_variant_type_get(int datatype);
-SR_PRIV int sr_variant_type_check(uint32_t key, GVariant *data);
+SR_PRIV int sr_variant_type_check(const struct sr_dev_driver *driver,
+		uint32_t key, GVariant *data);
+/* Resolve the sr_datatype for a config key: first tries the driver's
+ * config_type callback (if implemented), then falls back to the
+ * sr_key_info_config[] table in hwdriver.c. Returns the datatype
+ * (SR_T_*) or 0 if not found. */
+SR_PRIV int sr_dev_config_type_get(const struct sr_dev_driver *driver,
+		uint32_t key);
 SR_PRIV void sr_hw_cleanup_all(const struct sr_context *ctx);
 SR_PRIV struct sr_config *sr_config_new(uint32_t key, GVariant *data);
 SR_PRIV void sr_config_free(struct sr_config *src);

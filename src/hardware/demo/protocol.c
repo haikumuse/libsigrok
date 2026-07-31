@@ -888,7 +888,9 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 			ch = l->data;
 			if (!ch || ch->type != SR_CHANNEL_DSO || !ch->enabled)
 				continue;
-			uint8_t v = demo_dso_sample(devc->dso_pattern, i,
+			enum demo_dso_pattern pat = (ch_idx < DSO_MAX_CHANNELS)
+				? devc->dso_pattern[ch_idx] : DEMO_DSO_PATTERN_RANDOM;
+			uint8_t v = demo_dso_sample(pat, i,
 					mid, amp, ch_idx, wavelength);
 			/* Apply per-channel trigger-value offset. */
 			if (ch_idx < DSO_MAX_CHANNELS)
@@ -901,13 +903,66 @@ SR_PRIV int demo_send_dso_packet(const struct sr_dev_inst *sdi)
 	/* Build and send the DSO packet. */
 	dso.data = devc->dso_buf;
 	dso.num_samples = sending_samples;
-	dso.trig_flag = 1;            /* Trigger found in this packet. */
-	dso.trig_ch = 0;              /* First enabled DSO channel. */
 	dso.en_ch_num = en_ch_num;
 	dso.sample_bits = devc->dso_unit_bits;
-	dso.trig_offset = (int16_t)(sending_samples / 2);  /* Trigger at center. */
 	dso.packet_len = sending_samples * en_ch_num;
 	dso.samplerate_tog = (uint32_t)devc->cur_samplerate;
+
+	/* Trigger detection: scan the trigger-source channel's samples for a
+	 * crossing of dso_trig_value with the configured slope. If found,
+	 * trig_flag=1 and trig_offset marks the crossing sample. If not found,
+	 * trig_flag=0 — the GUI will show the waveform without trigger
+	 * alignment, causing it to "drift" between frames (auto-trigger).
+	 *
+	 * The dso_trig_value in the demo is an 8-bit threshold (0-255). The
+	 * trigger source is a 0-based DSO channel index. Slope 0=rising,
+	 * 1=falling (matching DSO_TRIGGER_RISING/FALLING in dsvdef.h).
+	 *
+	 * We scan the RAW buffer (before vdiv scaling) because trig_value is
+	 * in the same 8-bit space as the generated samples. The vdiv scaling
+	 * and coupling applied below are display-only transforms.
+	 *
+	 * dso_buf layout is interleaved [ch0_s0, ch1_s0, ch0_s1, ...] so
+	 * channel ch's sample at index j is at dso_buf[j * en_ch_num + ch].
+	 */
+	{
+		uint8_t trig_ch = devc->dso_trig_source;
+		uint8_t trig_level = (trig_ch < DSO_MAX_CHANNELS)
+			? devc->dso_trig_value[trig_ch] : 128;
+		uint8_t trig_slope = devc->dso_trig_slope; /* 0=rising, 1=falling */
+		int16_t trig_pos = -1;
+
+		if (trig_ch < en_ch_num && sending_samples > 1) {
+			for (i = 1; i < sending_samples; i++) {
+				uint8_t prev = devc->dso_buf[(i - 1) * en_ch_num + trig_ch];
+				uint8_t curr = devc->dso_buf[i * en_ch_num + trig_ch];
+				if (trig_slope == 0) { /* rising edge */
+					if (prev < trig_level && curr >= trig_level) {
+						trig_pos = (int16_t)i;
+						break;
+					}
+				} else { /* falling edge */
+					if (prev > trig_level && curr <= trig_level) {
+						trig_pos = (int16_t)i;
+						break;
+					}
+				}
+			}
+		}
+
+		if (trig_pos >= 0) {
+			dso.trig_flag = 1;
+			dso.trig_ch = trig_ch;
+			dso.trig_offset = trig_pos;
+		} else {
+			/* No trigger crossing found: report untriggered. The GUI
+			 * will display the waveform at the raw buffer position,
+			 * causing it to drift between frames (auto-trigger). */
+			dso.trig_flag = 0;
+			dso.trig_ch = trig_ch;
+			dso.trig_offset = 0;
+		}
+	}
 
 	/* Apply per-channel vdiv scaling before sending — mirrors old fork
 	 * demo's receive_data_dso vdiv transform. The dso_buf layout is

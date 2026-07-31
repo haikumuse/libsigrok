@@ -306,12 +306,13 @@ static const char *logic_channel_mode_strs[ARRAY_SIZE(logic_channel_modes)] = {
  * binding. Applies to both DSO and ANALOG (DAQ) channels — the binding
  * creates widgets for VDIV/COUPLING/MAP_* keys. */
 static const int32_t probe_configs[] = {
-	SR_CONF_PROBE_VDIV,
-	SR_CONF_PROBE_COUPLING,
-	SR_CONF_PROBE_MAP_DEFAULT,
-	SR_CONF_PROBE_MAP_UNIT,
-	SR_CONF_PROBE_MAP_MIN,
-	SR_CONF_PROBE_MAP_MAX,
+SR_CONF_PROBE_VDIV,
+SR_CONF_PROBE_COUPLING,
+SR_CONF_PROBE_MAP_DEFAULT,
+SR_CONF_PROBE_MAP_UNIT,
+SR_CONF_PROBE_MAP_MIN,
+SR_CONF_PROBE_MAP_MAX,
+SR_CONF_PATTERN_MODE,
 };
 
 /* Clamp cur_samplerate to the current logic channel-mode's max. Called from
@@ -401,8 +402,10 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->dso_sent_samples = 0;
 	/* DSO pattern + config-change regen flags (Tier A). Default pattern is
 	 * random so demo behavior matches old fork demo's default until the user
-	 * picks sine/square/sawtooth/triangle via the DSO PATTERN_MODE dropdown. */
-	devc->dso_pattern = DEMO_DSO_PATTERN_RANDOM;
+	 * picks sine/square/sawtooth/triangle via the DSO PATTERN_MODE dropdown.
+	 * Per-channel: each DSO channel can have a different waveform shape. */
+	for (int i = 0; i < DSO_MAX_CHANNELS; i++)
+		devc->dso_pattern[i] = DEMO_DSO_PATTERN_RANDOM;
 	devc->dso_vdiv_change = FALSE;
 	devc->dso_offset_change = FALSE;
 	devc->dso_timebase_change = FALSE;
@@ -594,6 +597,7 @@ static int config_get(uint32_t key, GVariant **data,
 	struct sr_channel *ch;
 	struct analog_gen *ag;
 	GVariant *mq_arr[2];
+	GSList *l;
 	int pattern;
 
 	if (!sdi)
@@ -675,11 +679,30 @@ static int config_get(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_PATTERN_MODE:
 		if (!cg) {
-			/* Device-level query: return the current logic pattern.
-			 * Used by DeviceAgent::get_demo_operation_mode() and the
-			 * DeviceOptionsDock property binding (bind_enum). */
-			*data = g_variant_new_string(
-				logic_pattern_str[devc->logic_pattern]);
+			/* Device-level query: return the current pattern based on
+			 * the active work mode (LOGIC/DSO/ANALOG). This lets the
+			 * DeviceOptionsDock Mode dropdown show DSO patterns when
+			 * in DSO mode, logic patterns when in LOGIC mode, etc.
+			 * DeviceAgent::get_demo_operation_mode() also reads this. */
+			if (devc->device_mode == DEMO_MODE_DSO)
+				*data = g_variant_new_string(
+					dso_pattern_strs[devc->dso_pattern[0]]);
+			else if (devc->device_mode == DEMO_MODE_ANALOG) {
+				/* Return first analog channel's pattern as representative. */
+				for (l = sdi->channels; l; l = l->next) {
+					ch = l->data;
+					if (ch && ch->type == SR_CHANNEL_ANALOG) {
+						ag = g_hash_table_lookup(devc->ch_ag, ch);
+						if (ag) {
+							*data = g_variant_new_string(
+									analog_pattern_str[ag->pattern]);
+							break;
+						}
+					}
+				}
+			} else
+				*data = g_variant_new_string(
+					logic_pattern_str[devc->logic_pattern]);
 			break;
 		}
 		/* Any channel in the group will do. */
@@ -692,9 +715,20 @@ static int config_get(uint32_t key, GVariant **data,
 			pattern = ag->pattern;
 			*data = g_variant_new_string(analog_pattern_str[pattern]);
 		} else if (ch->type == SR_CHANNEL_DSO) {
-			/* DSO pattern (random/sine/square/sawtooth/triangle). Shared
-			 * across all DSO channels — demo generates one waveform shape. */
-			*data = g_variant_new_string(dso_pattern_strs[devc->dso_pattern]);
+			/* DSO pattern (random/sine/square/sawtooth/triangle).
+			 * Per-channel: each DSO channel can have its own waveform shape.
+			 * cg->channels->data gives us the channel; we find its index. */
+			int dso_idx = 0;
+			int tmp_idx = 0;
+			for (l = sdi->channels; l; l = l->next, tmp_idx++) {
+				if (l->data == ch) {
+					dso_idx = tmp_idx;
+					break;
+				}
+			}
+			if (dso_idx >= DSO_MAX_CHANNELS)
+				dso_idx = 0;
+			*data = g_variant_new_string(dso_pattern_strs[devc->dso_pattern[dso_idx]]);
 		} else
 			return SR_ERR_BUG;
 		break;
@@ -738,7 +772,10 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_byte(devc->dso_trig_slope);
 		break;
 	case SR_CONF_HORIZ_TRIGGERPOS:
-		*data = g_variant_new_byte(devc->dso_trig_hrate);
+		/* hwdriver.c declares this key as SR_T_FLOAT (GVariant 'd' double).
+		 * Other drivers (yokogawa-dlm, siglent-sds, rigol-ds) all use double.
+		 * The value is a percentage 0-100 stored in dso_trig_hrate (uint8_t). */
+		*data = g_variant_new_double((double)devc->dso_trig_hrate);
 		break;
 	case SR_CONF_INSTANT:
 		/* Instant mode: when TRUE, demo_send_dso_packet sends progressive
@@ -1025,20 +1062,57 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_PATTERN_MODE:
 		if (!cg) {
-			/* Device-level set: set the logic pattern. Used by
-			 * DeviceOptionsDock property binding and set_session()
-			 * restore path. */
-			logic_pattern = std_str_idx(data,
-				ARRAY_AND_SIZE(logic_pattern_str));
-			if (logic_pattern < 0)
-				return SR_ERR_ARG;
-			sr_dbg("Setting logic pattern to %s",
-					logic_pattern_str[logic_pattern]);
-			devc->logic_pattern = logic_pattern;
-			if (logic_pattern == PATTERN_ALL_LOW)
-				memset(devc->logic_data, 0x00, LOGIC_BUFSIZE);
-			else if (logic_pattern == PATTERN_ALL_HIGH)
-				memset(devc->logic_data, 0xff, LOGIC_BUFSIZE);
+			/* Device-level set: set the pattern based on current work
+			 * mode. In DSO mode, sets the DSO waveform pattern
+			 * (sine/square/sawtooth/triangle/random). In LOGIC mode,
+			 * sets the logic pattern. In ANALOG mode, sets all analog
+			 * channels' pattern. */
+			if (devc->device_mode == DEMO_MODE_DSO) {
+				int dso_pat = std_str_idx(data,
+					ARRAY_AND_SIZE(dso_pattern_strs));
+				if (dso_pat < 0)
+					return SR_ERR_ARG;
+				sr_dbg("Setting DSO pattern to %s",
+						dso_pattern_strs[dso_pat]);
+				for (int i = 0; i < DSO_MAX_CHANNELS; i++)
+					devc->dso_pattern[i] = (enum demo_dso_pattern)dso_pat;
+				devc->dso_vdiv_change = TRUE;
+			} else if (devc->device_mode == DEMO_MODE_ANALOG) {
+				analog_pattern = std_str_idx(data,
+					ARRAY_AND_SIZE(analog_pattern_str));
+				if (analog_pattern < 0)
+					return SR_ERR_ARG;
+				sr_dbg("Setting analog pattern to %s (first channel only, "
+						"preserving per-channel defaults for others)",
+						analog_pattern_str[analog_pattern]);
+				/* Only set the first analog channel's pattern at device
+				 * level. Each analog channel has its own default pattern
+				 * (square/sine/triangle/sawtooth/random) set during scan.
+				 * Setting all channels to the same pattern would override
+				 * these defaults. Per-channel pattern changes should use
+				 * the channel-group SET path (cg != NULL). */
+				for (l = sdi->channels; l; l = l->next) {
+					ch = l->data;
+					if (ch && ch->type == SR_CHANNEL_ANALOG) {
+						ag = g_hash_table_lookup(devc->ch_ag, ch);
+						if (ag)
+							ag->pattern = analog_pattern;
+						break;  /* only first channel */
+					}
+				}
+			} else {
+				logic_pattern = std_str_idx(data,
+					ARRAY_AND_SIZE(logic_pattern_str));
+				if (logic_pattern < 0)
+					return SR_ERR_ARG;
+				sr_dbg("Setting logic pattern to %s",
+						logic_pattern_str[logic_pattern]);
+				devc->logic_pattern = logic_pattern;
+				if (logic_pattern == PATTERN_ALL_LOW)
+					memset(devc->logic_data, 0x00, LOGIC_BUFSIZE);
+				else if (logic_pattern == PATTERN_ALL_HIGH)
+					memset(devc->logic_data, 0xff, LOGIC_BUFSIZE);
+			}
 			break;
 		}
 		logic_pattern = std_str_idx(data, ARRAY_AND_SIZE(logic_pattern_str));
@@ -1054,8 +1128,19 @@ static int config_set(uint32_t key, GVariant *data,
 			if (ch->type == SR_CHANNEL_DSO) {
 				if (dso_pattern < 0)
 					return SR_ERR_ARG;
-				sr_dbg("Setting DSO pattern to %s", dso_pattern_strs[dso_pattern]);
-				devc->dso_pattern = (enum demo_dso_pattern)dso_pattern;
+				/* Find the DSO channel index to set per-channel pattern. */
+				int dso_idx = 0;
+				int tmp_idx = 0;
+				for (l = sdi->channels; l; l = l->next, tmp_idx++) {
+					if (l->data == ch) {
+						dso_idx = tmp_idx;
+						break;
+					}
+				}
+				if (dso_idx >= DSO_MAX_CHANNELS)
+					dso_idx = 0;
+				sr_dbg("Setting DSO ch%d pattern to %s", dso_idx, dso_pattern_strs[dso_pattern]);
+				devc->dso_pattern[dso_idx] = (enum demo_dso_pattern)dso_pattern;
 				/* Trigger waveform regeneration on next packet send. */
 				devc->dso_vdiv_change = TRUE;
 				break;
@@ -1123,7 +1208,8 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->dso_trig_slope = g_variant_get_byte(data);
 		break;
 	case SR_CONF_HORIZ_TRIGGERPOS:
-		devc->dso_trig_hrate = g_variant_get_byte(data);
+		/* Accept double (SR_T_FLOAT) from the GUI, store as uint8_t 0-100. */
+		devc->dso_trig_hrate = (uint8_t)g_variant_get_double(data);
 		break;
 	case SR_CONF_INSTANT:
 		/* Store instant flag — demo_send_dso_packet reads it to switch
@@ -1181,8 +1267,8 @@ static int config_set(uint32_t key, GVariant *data,
 			else
 				devc->sample_generator = DEMO_GEN_RANDOM;
 		}
-		demo_reset_dsl_path(sdi, devc->sample_generator);
-		demo_load_virtual_device_session(sdi);
+		demo_reset_dsl_path((struct sr_dev_inst *)sdi, devc->sample_generator);
+		demo_load_virtual_device_session((struct sr_dev_inst *)sdi);
 		break;
 	}
 	case SR_CONF_CAPTURE_NUM_PROBES:
@@ -1351,6 +1437,11 @@ static int config_list(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	struct sr_channel *ch;
+	struct dev_context *devc;
+
+	if (!sdi)
+		return SR_ERR_ARG;
+	devc = sdi->priv;
 
 	if (!cg) {
 		switch (key) {
@@ -1424,9 +1515,20 @@ static int config_list(uint32_t key, GVariant **data,
 			*data = g_variant_new_strv(ARRAY_AND_SIZE(dso_map_units));
 			break;
 		case SR_CONF_PATTERN_MODE:
-			/* Device-level: return logic pattern strings for the demo
-			 * pattern dropdown in DeviceOptionsDock Mode section. */
-			*data = g_variant_new_strv(ARRAY_AND_SIZE(logic_pattern_str));
+			/* Device-level: return pattern strings based on current
+			 * work mode so the Mode dropdown shows the correct list.
+			 * DSO mode shows dso_pattern_strs (sine/square/...),
+			 * ANALOG mode shows analog_pattern_str,
+			 * LOGIC mode shows logic_pattern_str. */
+			if (devc->device_mode == DEMO_MODE_DSO)
+				*data = g_variant_new_strv(
+					ARRAY_AND_SIZE(dso_pattern_strs));
+			else if (devc->device_mode == DEMO_MODE_ANALOG)
+				*data = g_variant_new_strv(
+					ARRAY_AND_SIZE(analog_pattern_str));
+			else
+				*data = g_variant_new_strv(
+					ARRAY_AND_SIZE(logic_pattern_str));
 			break;
 		default:
 			return SR_ERR_NA;
@@ -1580,13 +1682,13 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 
 	sr_info("demo dev_acquisition_start: cur_samplerate=%" PRIu64
 		", limit_samples=%" PRIu64 ", limit_msec=%" PRIu64
-		", limit_frames=%" PRIu64 ", capture_ratio=%u"
+		", limit_frames=%" PRIu64 ", capture_ratio=%" PRIu64
 		", num_logic=%zu, num_analog=%zu, num_dso=%zu"
 		", enabled_logic=%zu, enabled_analog=%zu"
 		", stl=%p, logic_unitsize=%zu",
 		devc->cur_samplerate, devc->limit_samples, devc->limit_msec,
 		devc->limit_frames, devc->capture_ratio,
-		devc->num_logic_channels, devc->num_analog_channels,
+		(size_t)devc->num_logic_channels, (size_t)devc->num_analog_channels,
 		(size_t)devc->num_dso_channels,
 		devc->enabled_logic_channels, devc->enabled_analog_channels,
 		(void*)devc->stl, devc->logic_unitsize);

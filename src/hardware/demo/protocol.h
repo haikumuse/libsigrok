@@ -331,8 +331,9 @@ struct dev_context {
 	uint8_t *dso_buf;
 	uint64_t dso_sent_samples;
 	/* DSO pattern selection (sine/square/sawtooth/triangle/random).
+	 * Per-channel: each DSO channel can have its own waveform shape.
 	 * Driven by SR_CONF_PATTERN_MODE on the DSO channel group. */
-	enum demo_dso_pattern dso_pattern;
+	enum demo_dso_pattern dso_pattern[DSO_MAX_CHANNELS];
 	/* Config-change flags: set in config_set when vdiv/offset/timebase change,
 	 * checked by dso_wavelength_updata() to trigger waveform regeneration
 	 * in demo_send_dso_packet. Mirrors old fork demo's vdiv_change etc. */

@@ -1108,6 +1108,22 @@ done_section:
 	/* Create sigrok channels here, late, logic before analog. */
 	create_channels(in, in->sdi, SR_CHANNEL_LOGIC);
 	create_channels(in, in->sdi, SR_CHANNEL_ANALOG);
+
+	/*
+	 * Safety net: if the VCD file contained no signal declarations
+	 * (no $var lines), inc->channels is empty and create_channels
+	 * created zero sigrok channels. Create a single default logic
+	 * channel so the device instance is usable and the viewport
+	 * is not blank. Without this, downstream code (init_signals,
+	 * reload) sees channel_count=0 and cannot create any signal
+	 * models, leaving the UI in a broken state.
+	 */
+	if (!in->sdi->channels) {
+		sr_dbg("VCD: no channels declared in file, creating default D0.");
+		(void)sr_channel_new(in->sdi, 0, SR_CHANNEL_LOGIC, TRUE, "D0");
+		inc->logic_count = 1;
+	}
+
 	if (!check_header_in_reread(in))
 		return SR_ERR_DATA;
 	create_feeds(in);

@@ -89,6 +89,7 @@ SR_API GSList *sr_dev_list(const struct sr_dev_driver *driver);
 SR_API int sr_dev_clear(const struct sr_dev_driver *driver);
 SR_API int sr_dev_open(struct sr_dev_inst *sdi);
 SR_API int sr_dev_close(struct sr_dev_inst *sdi);
+SR_API void sr_dev_inst_free(struct sr_dev_inst *sdi);
 
 SR_API struct sr_dev_driver *sr_dev_inst_driver_get(const struct sr_dev_inst *sdi);
 SR_API const char *sr_dev_inst_vendor_get(const struct sr_dev_inst *sdi);
@@ -234,6 +235,7 @@ SR_API int sr_input_send(const struct sr_input *in, GString *buf);
 SR_API int sr_input_end(const struct sr_input *in);
 SR_API int sr_input_reset(const struct sr_input *in);
 SR_API void sr_input_free(const struct sr_input *in);
+SR_API void sr_input_release_sdi(const struct sr_input *in);
 
 /*--- output/output.c -------------------------------------------------------*/
 

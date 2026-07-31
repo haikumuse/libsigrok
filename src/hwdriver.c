@@ -88,13 +88,22 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Pattern", NULL},
 	{SR_CONF_RLE, SR_T_BOOL, "rle",
 		"Run length encoding", NULL},
-	{SR_CONF_TRIGGER_SLOPE, SR_T_STRING, "triggerslope",
+	/* SR_CONF_TRIGGER_SLOPE: registered as SR_T_UINT8 to match the actual
+	 * GVariant type used by all fork drivers (demo, DSL):
+	 *   - demo/api.c:     new_byte / get_byte
+	 *   - dslogic/api.c:   new_byte / get_byte
+	 * Upstream sigrok uses SR_T_STRING, but PXView's fork uses byte
+	 * for set. Using SR_T_UINT8 lets sr_variant_type_check() accept
+	 * byte 'y' on the set path. The get path is not type-checked. */
+	{SR_CONF_TRIGGER_SLOPE, SR_T_UINT8, "triggerslope",
 		"Trigger slope", NULL},
 	{SR_CONF_AVERAGING, SR_T_BOOL, "averaging",
 		"Averaging", NULL},
 	{SR_CONF_AVG_SAMPLES, SR_T_UINT64, "avg_samples",
 		"Number of samples to average over", NULL},
-	{SR_CONF_TRIGGER_SOURCE, SR_T_STRING, "triggersource",
+	/* SR_CONF_TRIGGER_SOURCE: same rationale as TRIGGER_SLOPE above —
+	 * fork drivers use byte, not string. */
+	{SR_CONF_TRIGGER_SOURCE, SR_T_UINT8, "triggersource",
 		"Trigger source", NULL},
 	{SR_CONF_HORIZ_TRIGGERPOS, SR_T_FLOAT, "horiz_triggerpos",
 		"Horizontal trigger position", NULL},
@@ -102,7 +111,14 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Buffer size", NULL},
 	{SR_CONF_TIMEBASE, SR_T_UINT64, "timebase",
 		"Time base", NULL},
-	{SR_CONF_FILTER, SR_T_BOOL, "filter",
+	/* SR_CONF_FILTER: registered as SR_T_STRING to match the actual GVariant
+	 * type used by all fork drivers (demo, DSL, pxlogic):
+	 *   - dslogic/api.c: GET new_string / SET std_str_idx (string)
+	 *   - pxlogic.c:    GET new_string / SET std_str_idx (string)
+	 * Upstream sigrok uses SR_T_BOOL, but PXView's fork uses string for
+	 * both set and get. Using SR_T_STRING lets sr_variant_type_check()
+	 * accept string 's' on the set path. */
+	{SR_CONF_FILTER, SR_T_STRING, "filter",
 		"Filter", NULL},
 	{SR_CONF_VDIV, SR_T_RATIONAL_VOLT, "vdiv",
 		"Volts/div", NULL},
@@ -252,12 +268,14 @@ static struct sr_key_info sr_key_info_config[] = {
 	 * GVariant types used by all drivers in this codebase:
 	 *   - demo/api.c:      config_get → int16, config_set → get_int16
 	 *   - pxlogic.c:       config_get → int32, config_set → get_int16
-	 *   - dslogic/api.c:   config_get → string, config_set → get_int16
+	 *   - dslogic/api.c:   config_get → int16, config_set → get_int16
 	 *   - session_driver:  config_get → int16, config_set → get_int16
 	 * The upstream sigrok registered this as SR_T_STRING, but PXView's
 	 * fork drivers all use integer variants for set. Using SR_T_INT16
 	 * lets sr_variant_type_check() accept int16/int32 (subtype) on the
-	 * set path. The get path is not type-checked by sr_config_get(). */
+	 * set path. The get path is not type-checked by sr_config_get().
+	 * Note: pxlogic GET returns int32 (not int16); the GUI's
+	 * get_config_int32() handles this via runtime type dispatch. */
 	{SR_CONF_DEVICE_MODE, SR_T_INT16, "device_mode",
 		"Device mode", NULL},
 	{SR_CONF_TEST_MODE, SR_T_STRING, "test_mode",
@@ -330,7 +348,12 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Channel mode", NULL},
 	{SR_CONF_MAX_HEIGHT, SR_T_STRING, "max_height",
 		"Max height", NULL},
-	{SR_CONF_MAX_HEIGHT_VALUE, SR_T_INT32, "max_height_value",
+	/* SR_CONF_MAX_HEIGHT_VALUE: registered as SR_T_UINT8 to match the actual
+	 * GVariant type used by all fork drivers (demo, DSL):
+	 *   - demo/api.c:   GET new_byte
+	 *   - dslogic/api.c: GET new_byte
+	 * Upstream sigrok uses SR_T_INT32, but PXView's fork uses byte 'y'. */
+	{SR_CONF_MAX_HEIGHT_VALUE, SR_T_UINT8, "max_height_value",
 		"Max height value", NULL},
 	{SR_CONF_THRESHOLD, SR_T_STRING, "threshold",
 		"Threshold levels", NULL},
@@ -403,7 +426,13 @@ static struct sr_key_info sr_key_info_config[] = {
 	{SR_CONF_TRIGGER_MARGIN, SR_T_UINT8, "trigger_margin",
 		"Trigger margin", NULL},
 	{SR_CONF_CLOCK_TYPE, SR_T_BOOL, "clock_type", "Clock type", NULL},
-	{SR_CONF_BANDWIDTH_LIMIT, SR_T_UINT8, "bandwidth_limit",
+	/* SR_CONF_BANDWIDTH_LIMIT: registered as SR_T_STRING to match the actual
+	 * GVariant type used by the DSL driver:
+	 *   - dslogic/api.c: GET new_string / SET std_str_idx (string)
+	 * Upstream sigrok uses SR_T_UINT8, but PXView's fork uses string for
+	 * both set and get. Using SR_T_STRING lets sr_variant_type_check()
+	 * accept string 's' on the set path. */
+	{SR_CONF_BANDWIDTH_LIMIT, SR_T_STRING, "bandwidth_limit",
 		"Bandwidth limit", NULL},
 	{SR_CONF_BANDWIDTH, SR_T_BOOL, "bandwidth", "Bandwidth", NULL},
 	{SR_CONF_PROBE_PREOFF, SR_T_UINT16, "probe_preoff",
@@ -548,24 +577,52 @@ SR_PRIV const GVariantType *sr_variant_type_get(int datatype)
 }
 
 /** @private */
-SR_PRIV int sr_variant_type_check(uint32_t key, GVariant *value)
+SR_PRIV int sr_dev_config_type_get(const struct sr_dev_driver *driver,
+		uint32_t key)
+{
+	const struct sr_key_info *info;
+
+	/* If the driver provides a config_type callback, ask it first.
+	 * This lets fork drivers declare their actual GVariant type even
+	 * when it differs from the hwdriver.c table (e.g. fork uses byte
+	 * where the table says string). */
+	if (driver && driver->config_type) {
+		int dt = driver->config_type(key);
+		if (dt > 0)
+			return dt;
+	}
+
+	/* Fall back to the centralized table. */
+	info = sr_key_info_get(SR_KEY_CONFIG, key);
+	if (!info)
+		return 0;
+
+	return info->datatype;
+}
+
+/** @private */
+SR_PRIV int sr_variant_type_check(const struct sr_dev_driver *driver,
+		uint32_t key, GVariant *value)
 {
 	const struct sr_key_info *info;
 	const GVariantType *type, *expected;
 	char *expected_string, *type_string;
+	int datatype;
 
-	info = sr_key_info_get(SR_KEY_CONFIG, key);
-	if (!info)
-		return SR_OK;
+	/* Resolve the expected datatype: driver override first, then table. */
+	datatype = sr_dev_config_type_get(driver, key);
+	if (datatype <= 0)
+		return SR_OK;  /* key not found — no type to check against */
 
-	expected = sr_variant_type_get(info->datatype);
+	expected = sr_variant_type_get(datatype);
 	type = g_variant_get_type(value);
 	if (!g_variant_type_equal(type, expected)
 			&& !g_variant_type_is_subtype_of(type, expected)) {
+		info = sr_key_info_get(SR_KEY_CONFIG, key);
 		expected_string = g_variant_type_dup_string(expected);
 		type_string = g_variant_type_dup_string(type);
 		sr_err("Wrong variant type for key '%s': expected '%s', got '%s'",
-			info->name, expected_string, type_string);
+			info ? info->name : "(unknown)", expected_string, type_string);
 		g_free(expected_string);
 		g_free(type_string);
 		return SR_ERR_ARG;
@@ -705,7 +762,7 @@ static int check_options(struct sr_dev_driver *driver, GSList *options,
 			ret = SR_ERR_ARG;
 			break;
 		}
-		if (sr_variant_type_check(src->key, src->data) != SR_OK) {
+		if (sr_variant_type_check(driver, src->key, src->data) != SR_OK) {
 			ret = SR_ERR_ARG;
 			break;
 		}
@@ -1017,6 +1074,23 @@ SR_API int sr_config_get(const struct sr_dev_driver *driver,
 		/* Got a floating reference from the driver. Sink it here,
 		 * caller will need to unref when done with it. */
 		g_variant_ref_sink(*data);
+		/* GET-path type check: unlike the SET path (which rejects
+		 * mismatches with SR_ERR_ARG), a GET mismatch is logged as
+		 * a warning but the data is still returned. This is because
+		 * the caller may handle multiple GVariant types via runtime
+		 * dispatch (e.g. DeviceAgent::get_config_int32 checks the
+		 * actual type and calls the matching g_variant_get_*).
+		 *
+		 * Without this check, a GET type mismatch is completely
+		 * invisible — no log, no error — and silently corrupts data
+		 * if the caller happens to use the wrong g_variant_get_*.
+		 * With this check, mismatches appear in the log as:
+		 *   "Wrong variant type for key 'xxx': expected 'n', got 'i'"
+		 * making them easy to diagnose. */
+		if (sr_variant_type_check(driver, key, *data) != SR_OK) {
+			sr_warn("GET type mismatch for key %d — data returned "
+				"but type does not match hwdriver.c declaration", key);
+		}
 	}
 
 	if (ret == SR_ERR_CHANNEL_GROUP)
@@ -1064,7 +1138,7 @@ SR_API int sr_config_set(const struct sr_dev_inst *sdi,
 		ret = SR_ERR_DEV_CLOSED;
 	} else if (check_key(sdi->driver, sdi, cg, key, SR_CONF_SET, data) != SR_OK)
 		return SR_ERR_ARG;
-	else if ((ret = sr_variant_type_check(key, data)) == SR_OK) {
+	else if ((ret = sr_variant_type_check(sdi->driver, key, data)) == SR_OK) {
 		log_key(sdi, cg, key, SR_CONF_SET, data);
 		ret = sdi->driver->config_set(key, data, sdi, cg);
 	}

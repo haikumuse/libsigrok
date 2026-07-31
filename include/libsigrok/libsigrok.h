@@ -1595,6 +1595,17 @@ struct sr_dev_driver {
 	int (*config_list) (uint32_t key, GVariant **data,
 			const struct sr_dev_inst *sdi,
 			const struct sr_channel_group *cg);
+	/** Query the driver's actual GVariant datatype for a config key.
+	 *  Optional — if NULL, the hwdriver.c sr_key_info_config[] table
+	 *  is used as the fallback.  Drivers that use a different GVariant
+	 *  type than the table declares should implement this to return
+	 *  their actual type, so that sr_variant_type_check() can validate
+	 *  correctly.
+	 *  @param key The configuration key (SR_CONF_*).
+	 *  @return An enum sr_datatype value (SR_T_*), or 0 if the driver
+	 *          has no override for this key (use the table instead).
+	 *  @see sr_variant_type_check(). */
+	int (*config_type) (uint32_t key);
 
 	/* Device-specific */
 	/** Open device */

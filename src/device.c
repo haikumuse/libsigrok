@@ -502,9 +502,12 @@ SR_API int sr_dev_inst_channel_add(struct sr_dev_inst *sdi, int index, int type,
  *
  * @param sdi Device instance to free. If NULL, the function will do nothing.
  *
- * @private
+ * Release (free) a device instance and all associated resources.
+ *
+ * Callers that received sdi ownership (e.g. from sr_session_load_file_device
+ * or sr_input_release_sdi) must call this to avoid a memory leak.
  */
-SR_PRIV void sr_dev_inst_free(struct sr_dev_inst *sdi)
+SR_API void sr_dev_inst_free(struct sr_dev_inst *sdi)
 {
 	struct sr_channel *ch;
 	GSList *l;

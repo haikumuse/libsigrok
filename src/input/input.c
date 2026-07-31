@@ -703,4 +703,48 @@ SR_API void sr_input_free(const struct sr_input *in)
 	g_free((gpointer)in);
 }
 
+/**
+ * Release the input instance but detach (do not free) the device instance.
+ *
+ * This is identical to sr_input_free() except that the sdi is NOT freed.
+ * Ownership of the sdi is transferred to the caller, who must later free
+ * it with sr_dev_inst_free().
+ *
+ * This is needed when the input's sdi has been registered with a device
+ * manager (e.g. DeviceAgent) that continues to use the sdi after the input
+ * module itself is no longer needed. Calling sr_input_free() in that
+ * scenario would free the sdi while it is still in use, causing a
+ * use-after-free crash.
+ *
+ * @since 0.6.0
+ */
+SR_API void sr_input_release_sdi(const struct sr_input *in)
+{
+	if (!in)
+		return;
+
+	/*
+	 * Run the input module's optional .cleanup() routine BEFORE
+	 * detaching the sdi. The cleanup function only accesses in->priv
+	 * (not in->sdi) in all current input modules, so it is safe to
+	 * call it while the sdi is still attached.
+	 */
+	if (in->module->cleanup)
+		in->module->cleanup((struct sr_input *)in);
+
+	/*
+	 * Detach the sdi so that it is NOT freed when we release the
+	 * input's own resources below. The caller now owns the sdi.
+	 */
+	((struct sr_input *)in)->sdi = NULL;
+
+	if (in->buf->len > 64) {
+		sr_warn("Found %" G_GSIZE_FORMAT
+			" unprocessed bytes at free time.", in->buf->len);
+	}
+	g_string_free(in->buf, TRUE);
+	g_free(in->priv);
+	g_free((gpointer)in);
+}
+
 /** @} */

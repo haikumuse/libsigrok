@@ -1324,7 +1324,10 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(devc->is_loop);
 		break;
 	case SR_CONF_DEVICE_MODE:
-		*data = g_variant_new_string(device_mode_strs[devc->mode]);
+		/* hwdriver.c declares SR_T_INT16. Return int16 to match the table
+		 * and the demo/pxlogic drivers. The string list is still available
+		 * via config_list (SR_CONF_LIST path below). */
+		*data = g_variant_new_int16((int16_t)devc->mode);
 		break;
 	case SR_CONF_PROBE_VDIV:
 		if (!ch || !ch->priv)
@@ -1367,10 +1370,12 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_byte(devc->trigger_margin);
 		break;
 	case SR_CONF_HORIZ_TRIGGERPOS:
+		/* hwdriver.c declares SR_T_FLOAT (GVariant 'd' double).
+		 * DSL drivers store percentage as uint8_t; convert to/from double. */
 		if (devc->mode == DSL_MODE_DSO)
-			*data = g_variant_new_byte(devc->trigger_hrate);
+			*data = g_variant_new_double((double)devc->trigger_hrate);
 		else
-			*data = g_variant_new_byte(devc->trigger_hpos);
+			*data = g_variant_new_double((double)devc->trigger_hpos);
 		break;
 	case SR_CONF_MAX_DSO_SAMPLERATE:
 		*data = g_variant_new_uint64(channel_modes[devc->ch_mode].max_samplerate);
@@ -1787,12 +1792,13 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->trigger_margin = g_variant_get_byte(data);
 		break;
 	case SR_CONF_HORIZ_TRIGGERPOS:
+		/* Accept double (SR_T_FLOAT) from GUI, store as uint8_t. */
 		if (devc->mode == DSL_MODE_DSO) {
-			devc->trigger_hrate = g_variant_get_byte(data);
+			devc->trigger_hrate = (uint8_t)g_variant_get_double(data);
 			devc->trigger_hpos = devc->trigger_hrate *
 				dsl_en_ch_num(sdi) * devc->limit_samples / 200.0;
 		} else {
-			devc->trigger_hpos = g_variant_get_byte(data) *
+			devc->trigger_hpos = (uint8_t)g_variant_get_double(data) *
 				devc->limit_samples / 100.0;
 		}
 		break;

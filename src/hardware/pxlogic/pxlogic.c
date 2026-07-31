@@ -989,7 +989,10 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         *data = g_variant_new_boolean(devc->trig_out_en);
         break;
     case SR_CONF_FILTER:
-        *data = g_variant_new_int16(devc->filter);
+        /* Return string to match hwdriver.c SR_T_STRING declaration and the
+         * SET path (std_str_idx). config_list returns the same array as
+         * g_variant_new_strv, so the GUI can match the current selection. */
+        *data = g_variant_new_string(filter_modes[devc->filter]);
         break;
 
     case SR_CONF_PWM0_EN:
