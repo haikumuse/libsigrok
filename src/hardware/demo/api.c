@@ -1143,12 +1143,24 @@ static int config_set(uint32_t key, GVariant *data,
 		int new_mode = g_variant_get_int16(data);
 		struct sr_channel *ch;
 		GSList *l;
-		/* Toggle channel enabled flags based on new mode. */
+		/* Toggle channel enabled flags based on new mode. For LOGIC mode,
+		 * respect the current channel-mode's num_channels limit (e.g. if
+		 * the user selected "Use 16 Channels", only 16 of 32 logic channels
+		 * should be enabled). */
+		uint16_t logic_limit = (new_mode == DEMO_MODE_LOGIC)
+			? logic_channel_modes[devc->logic_ch_mode_index].num_channels
+			: 0;
+		int logic_seen = 0;
 		for (l = sdi->channels; l; l = l->next) {
 			ch = l->data;
 			switch (new_mode) {
 			case DEMO_MODE_LOGIC:
-				ch->enabled = (ch->type == SR_CHANNEL_LOGIC);
+				if (ch->type == SR_CHANNEL_LOGIC) {
+					ch->enabled = (logic_seen < logic_limit);
+					logic_seen++;
+				} else {
+					ch->enabled = FALSE;
+				}
 				break;
 			case DEMO_MODE_DSO:
 				ch->enabled = (ch->type == SR_CHANNEL_DSO);
@@ -1184,23 +1196,29 @@ static int config_set(uint32_t key, GVariant *data,
 		/* Logic channel-mode selection (string). Validate via std_str_idx
 		 * against logic_channel_mode_strs[]; set index + id, then clamp
 		 * cur_samplerate to the mode's max via logic_adjust_samplerate().
-		 * Also enable/disable logic channels based on the mode's num_channels
-		 * so the GUI reflects the active channel count (mirrors pxlogic). */
+		 *
+		 * Only toggle logic channel enabled flags when in LOGIC mode. In
+		 * DSO/ANALOG mode, config restore may set CHANNEL_MODE from a
+		 * saved .pxc file — re-enabling logic channels here would break
+		 * the DSO data path (demo_prepare_data checks has_enabled_other
+		 * and skips SR_DF_DSO if any non-DSO channel is enabled). The
+		 * mode is stored for when the user switches back to LOGIC. */
 		int idx = std_str_idx(data, ARRAY_AND_SIZE(logic_channel_mode_strs));
 		if (idx < 0)
 			return SR_ERR_ARG;
 		devc->logic_ch_mode_index = (enum demo_logic_channel_index)idx;
 		devc->logic_ch_mode = logic_channel_modes[idx].id;
-		sr_info("demo: set CHANNEL_MODE='%s' (index=%d)",
-		        logic_channel_modes[idx].descr, idx);
-		/* Enable/disable logic channels based on mode's channel count. */
-		uint16_t mode_channels = logic_channel_modes[idx].num_channels;
-		int ch_idx = 0;
-		for (GSList *l = sdi->channels; l; l = l->next) {
-			struct sr_channel *ch = l->data;
-			if (ch->type == SR_CHANNEL_LOGIC) {
-				ch->enabled = (ch_idx < mode_channels);
-				ch_idx++;
+		sr_info("demo: set CHANNEL_MODE='%s' (index=%d, device_mode=%d)",
+		        logic_channel_modes[idx].descr, idx, devc->device_mode);
+		if (devc->device_mode == DEMO_MODE_LOGIC) {
+			uint16_t mode_channels = logic_channel_modes[idx].num_channels;
+			int ch_idx = 0;
+			for (GSList *l = sdi->channels; l; l = l->next) {
+				struct sr_channel *ch = l->data;
+				if (ch->type == SR_CHANNEL_LOGIC) {
+					ch->enabled = (ch_idx < mode_channels);
+					ch_idx++;
+				}
 			}
 		}
 		logic_adjust_samplerate(devc);
