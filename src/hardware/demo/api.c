@@ -717,16 +717,14 @@ static int config_get(uint32_t key, GVariant **data,
 		} else if (ch->type == SR_CHANNEL_DSO) {
 			/* DSO pattern (random/sine/square/sawtooth/triangle).
 			 * Per-channel: each DSO channel can have its own waveform shape.
-			 * cg->channels->data gives us the channel; we find its index. */
-			int dso_idx = 0;
-			int tmp_idx = 0;
-			for (l = sdi->channels; l; l = l->next, tmp_idx++) {
-				if (l->data == ch) {
-					dso_idx = tmp_idx;
-					break;
-				}
-			}
-			if (dso_idx >= DSO_MAX_CHANNELS)
+			 * Compute the DSO-specific index by subtracting logic and analog
+			 * channel counts, same as PROBE_VDIV/etc. The old code used the
+			 * global channel list position (which includes 32+ logic/analog
+			 * channels), so dso_idx was always >= DSO_MAX_CHANNELS and got
+			 * clamped to 0 — all DSO channels read channel 0's pattern. */
+			int dso_idx = ch->index - devc->num_logic_channels
+				- devc->num_analog_channels;
+			if (dso_idx < 0 || dso_idx >= DSO_MAX_CHANNELS)
 				dso_idx = 0;
 			*data = g_variant_new_string(dso_pattern_strs[devc->dso_pattern[dso_idx]]);
 		} else
@@ -1128,16 +1126,13 @@ static int config_set(uint32_t key, GVariant *data,
 			if (ch->type == SR_CHANNEL_DSO) {
 				if (dso_pattern < 0)
 					return SR_ERR_ARG;
-				/* Find the DSO channel index to set per-channel pattern. */
-				int dso_idx = 0;
-				int tmp_idx = 0;
-				for (l = sdi->channels; l; l = l->next, tmp_idx++) {
-					if (l->data == ch) {
-						dso_idx = tmp_idx;
-						break;
-					}
-				}
-				if (dso_idx >= DSO_MAX_CHANNELS)
+				/* Compute DSO-specific index (same fix as config_get).
+				 * Old code used global channel list position, which was
+				 * always >= DSO_MAX_CHANNELS → clamped to 0 → all writes
+				 * went to dso_pattern[0]. */
+				int dso_idx = ch->index - devc->num_logic_channels
+					- devc->num_analog_channels;
+				if (dso_idx < 0 || dso_idx >= DSO_MAX_CHANNELS)
 					dso_idx = 0;
 				sr_dbg("Setting DSO ch%d pattern to %s", dso_idx, dso_pattern_strs[dso_pattern]);
 				devc->dso_pattern[dso_idx] = (enum demo_dso_pattern)dso_pattern;
