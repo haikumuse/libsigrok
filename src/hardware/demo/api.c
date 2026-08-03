@@ -81,6 +81,13 @@ static const uint32_t devopts[] = {
 	SR_CONF_OPERATION_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_CAPTURE_RATIO | SR_CONF_GET | SR_CONF_SET,
+	/* Advanced trigger configuration (PXView-local extension keys).
+	 * Demo driver accepts and stores them for consistency with pxlogic,
+	 * enabling API-level testing without hardware. */
+	SR_CONF_TRIGGER_ADV_MODE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_ADV_ENABLE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_ADV_STAGES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_ADV_CONFIG | SR_CONF_GET | SR_CONF_SET,
 	/* DSO device-level options */
 	SR_CONF_TIMEBASE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_MAX_TIMEBASE | SR_CONF_GET,
@@ -381,6 +388,10 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->num_analog_channels = num_analog_channels;
 	devc->limit_frames = limit_frames;
 	devc->capture_ratio = 20;
+	devc->trig_adv_mode = 0;      /* Simple */
+	devc->trig_adv_enable = FALSE;
+	devc->trig_adv_stages = 0;
+	devc->trig_adv_config = NULL;
 	devc->stl = NULL;
 	/* Default to Buffer Mode (trigger-aware, finite capture). User can
 	 * switch to Stream Mode via the samplingbar OPERATION_MODE dropdown. */
@@ -758,6 +769,18 @@ static int config_get(uint32_t key, GVariant **data,
 		break;
 	case SR_CONF_CAPTURE_RATIO:
 		*data = g_variant_new_uint64(devc->capture_ratio);
+		break;
+	case SR_CONF_TRIGGER_ADV_MODE:
+		*data = g_variant_new_byte(devc->trig_adv_mode);
+		break;
+	case SR_CONF_TRIGGER_ADV_ENABLE:
+		*data = g_variant_new_boolean(devc->trig_adv_enable);
+		break;
+	case SR_CONF_TRIGGER_ADV_STAGES:
+		*data = g_variant_new_byte(devc->trig_adv_stages);
+		break;
+	case SR_CONF_TRIGGER_ADV_CONFIG:
+		*data = g_variant_new_string(devc->trig_adv_config ? devc->trig_adv_config : "");
 		break;
 	/* --- DSO device-level config --- */
 	case SR_CONF_TIMEBASE:
@@ -1195,6 +1218,22 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_CAPTURE_RATIO:
 		devc->capture_ratio = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_TRIGGER_ADV_MODE:
+		devc->trig_adv_mode = g_variant_get_byte(data);
+		break;
+	case SR_CONF_TRIGGER_ADV_ENABLE:
+		devc->trig_adv_enable = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_TRIGGER_ADV_STAGES:
+		devc->trig_adv_stages = g_variant_get_byte(data);
+		break;
+	case SR_CONF_TRIGGER_ADV_CONFIG:
+		g_free(devc->trig_adv_config);
+		{
+			const char *cfg_str = g_variant_get_string(data, NULL);
+			devc->trig_adv_config = g_strdup(cfg_str ? cfg_str : "");
+		}
 		break;
 	/* --- DSO device-level config --- */
 	case SR_CONF_TIMEBASE:

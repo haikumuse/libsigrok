@@ -305,6 +305,11 @@ struct dev_context {
 	uint64_t capture_ratio;
 	gboolean trigger_fired;
 	struct soft_trigger_logic *stl;
+	/* Advanced trigger configuration (PXView-local extension). */
+	uint8_t trig_adv_mode;       /* 0=Simple, 1=Adv, 2=Serial */
+	gboolean trig_adv_enable;    /* advanced trigger enabled */
+	uint8_t trig_adv_stages;     /* stage count */
+	char *trig_adv_config;       /* JSON string with full advanced trigger config */
 	/* DSO */
 	int32_t num_dso_channels;
 	size_t enabled_dso_channels;

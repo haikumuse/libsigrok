@@ -262,6 +262,16 @@ struct PX_context {
    * fork-era pxlogic_trigger_cfg.trigger_pos stub that nobody populated.
    * Set via SR_CONF_CAPTURE_RATIO by the application layer before capture. */
   uint64_t capture_ratio;
+
+  /* Advanced trigger configuration. The old fork used ds_trigger_* C API
+   * to push multi-stage trigger config directly into a global struct.
+   * Upstream libsigrok has no equivalent, so these fields store the same
+   * information via SR_CONF_TRIGGER_ADV_* keys. set_trigger() reads them
+   * at acquisition start to configure the FPGA trigger engine. */
+  uint8_t trig_adv_mode;       /* 0=Simple, 1=Adv, 2=Serial */
+  gboolean trig_adv_enable;    /* advanced trigger enabled */
+  uint8_t trig_adv_stages;     /* stage count (1..NUM_TRIGGER_STAGES) */
+  char *trig_adv_config;       /* JSON string with full advanced trigger config */
   double stream_buff_size;
   double stream_mem_buff_size;
   gboolean disk_cache_enable;
@@ -415,6 +425,13 @@ static const uint32_t devopts[] = {
     SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_OUT     | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_MATCH   | SR_CONF_LIST,
+    /* Advanced trigger configuration (PXView-local extension keys).
+     * Replaces the fork-era ds_trigger_* C API. The application layer pushes
+     * the full advanced/serial trigger config via these keys before capture. */
+    SR_CONF_TRIGGER_ADV_MODE   | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_TRIGGER_ADV_ENABLE | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_TRIGGER_ADV_STAGES | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_TRIGGER_ADV_CONFIG | SR_CONF_GET | SR_CONF_SET,
     /* PWM0/PWM1 输出配置：驱动 config_get/set 已实现，UI 通过
      * deviceoptions.cpp 的 switch case 渲染为控件。PWM1 在旧版中被
      * 注释掉，新版按用户需求一并暴露。 */

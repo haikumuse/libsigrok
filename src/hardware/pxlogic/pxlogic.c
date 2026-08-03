@@ -321,6 +321,10 @@ static struct PX_context *pxlogic_dev_new(const struct PX_profile *prof)
     devc->pwm1_duty_set = (uint32_t)((double)devc->pwm1_freq_set * devc->pwm1_duty / 100);
     devc->is_loop = 0;
     devc->capture_ratio = 0;
+    devc->trig_adv_mode = 0;      /* Simple */
+    devc->trig_adv_enable = FALSE;
+    devc->trig_adv_stages = 0;
+    devc->trig_adv_config = NULL;
 
     devc->stream_buff_size = 16;
     devc->stream_mem_buff_size = 16;
@@ -882,6 +886,11 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
     struct PX_context *devc = sdi->priv;
     (void)devc;
     sr_info("hw_dev_close");
+
+    /* Free dynamically allocated advanced trigger config string. */
+    g_free(devc->trig_adv_config);
+    devc->trig_adv_config = NULL;
+
     hw_usb_close(sdi);
     sdi->status = SR_ST_INACTIVE;
 
@@ -1022,6 +1031,19 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
          * SR_DF_TRIGGER has no payload, so the app reads the trigger
          * cursor position via this key instead. Returns uint64 samples. */
         *data = g_variant_new_uint64(devc->trigger_pos_set);
+        break;
+
+    case SR_CONF_TRIGGER_ADV_MODE:
+        *data = g_variant_new_byte(devc->trig_adv_mode);
+        break;
+    case SR_CONF_TRIGGER_ADV_ENABLE:
+        *data = g_variant_new_boolean(devc->trig_adv_enable);
+        break;
+    case SR_CONF_TRIGGER_ADV_STAGES:
+        *data = g_variant_new_byte(devc->trig_adv_stages);
+        break;
+    case SR_CONF_TRIGGER_ADV_CONFIG:
+        *data = g_variant_new_string(devc->trig_adv_config ? devc->trig_adv_config : "");
         break;
 
     case SR_CONF_HW_DEPTH:
@@ -1341,6 +1363,24 @@ static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sd
         usb_wr_reg(usb->devhdl, 20 << 2, devc->pwm1_freq_set - 1);
         usb_wr_reg(usb->devhdl, 21 << 2, devc->pwm1_duty_set - 1);
         usb_wr_reg(usb->devhdl, 19 << 2, (uint32_t)devc->pwm1_en);
+    } else if (key == SR_CONF_TRIGGER_ADV_MODE) {
+        devc->trig_adv_mode = g_variant_get_byte(data);
+        sr_dbg("%s: setting trig_adv_mode to %d", __func__, devc->trig_adv_mode);
+        ret = SR_OK;
+    } else if (key == SR_CONF_TRIGGER_ADV_ENABLE) {
+        devc->trig_adv_enable = g_variant_get_boolean(data);
+        sr_dbg("%s: setting trig_adv_enable to %d", __func__, devc->trig_adv_enable);
+        ret = SR_OK;
+    } else if (key == SR_CONF_TRIGGER_ADV_STAGES) {
+        devc->trig_adv_stages = g_variant_get_byte(data);
+        sr_dbg("%s: setting trig_adv_stages to %d", __func__, devc->trig_adv_stages);
+        ret = SR_OK;
+    } else if (key == SR_CONF_TRIGGER_ADV_CONFIG) {
+        g_free(devc->trig_adv_config);
+        const char *cfg_str = g_variant_get_string(data, NULL);
+        devc->trig_adv_config = g_strdup(cfg_str ? cfg_str : "");
+        sr_dbg("%s: setting trig_adv_config (len=%zu)", __func__, strlen(devc->trig_adv_config));
+        ret = SR_OK;
     } else {
         ret = SR_ERR_NA;
     }

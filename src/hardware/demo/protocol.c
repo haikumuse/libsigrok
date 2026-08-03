@@ -1294,12 +1294,23 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		if (devc->loop_mode) {
 			/* Loop mode: wrap counters and keep streaming instead of
 			 * stopping. The session timer stays alive so data flows
-			 * continuously until the user presses stop. */
-			sr_info("demo_prepare_data: LOOP wrap (sent_samples=%" PRIu64
-				" -> 0, spent_us=%" PRId64 " -> 0)",
-				devc->sent_samples, devc->spent_us);
+			 * continuously until the user presses stop.
+			 *
+			 * CRITICAL FIX: Sync spent_us to elapsed_us (NOT reset to 0).
+			 * elapsed_us = g_get_monotonic_time() - start_us keeps growing
+			 * across wraps because start_us is set once at acquisition start.
+			 * If spent_us is reset to 0, the next tick computes
+			 *   todo_us = elapsed_us - 0 = total elapsed time since start,
+			 * causing the driver to dump ALL accumulated time as a single
+			 * massive batch (e.g. 24s * 1MHz = 24M samples in one call).
+			 * This floods the data feed and freezes the UI.
+			 * Setting spent_us = elapsed_us makes todo_us = 0 on the next
+			 * tick, then normal ~25ms increments resume on subsequent ticks. */
+			sr_dbg("demo_prepare_data: LOOP wrap (sent_samples=%" PRIu64
+				" -> 0, spent_us=%" PRId64 " -> %" PRId64 ")",
+				devc->sent_samples, devc->spent_us, elapsed_us);
 			devc->sent_samples = 0;
-			devc->spent_us = 0;
+			devc->spent_us = elapsed_us;
 		} else {
 			/* If we're averaging everything - now is the time to send data */
 			if (devc->avg && devc->avg_samples == 0) {

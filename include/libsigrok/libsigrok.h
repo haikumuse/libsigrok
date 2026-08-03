@@ -1490,6 +1490,25 @@ enum sr_configkey {
 	SR_CONF_LOAD_DECODER,               /* 60093 — load decoder flag */
 	SR_CONF_NUM_BLOCKS,                 /* 60094 — file block count */
 
+	/*--- Advanced Trigger Keys ----------------------------------------*/
+	/* PXView-local extension keys for advanced/serial trigger configuration.
+	 * The old fork used the ds_trigger_* C API to push multi-stage trigger
+	 * config (value0/value1/logic/inv/count per stage, serial params) directly
+	 * into a global struct read by the driver. Upstream libsigrok has no
+	 * equivalent, so these keys provide the same capability via SR_CONF.
+	 *
+	 * SR_CONF_TRIGGER_ADV_MODE: uint8, 0=Simple, 1=Adv, 2=Serial.
+	 * SR_CONF_TRIGGER_ADV_ENABLE: bool, advanced trigger enabled.
+	 * SR_CONF_TRIGGER_ADV_STAGES: uint8, stage count (1..TriggerStages).
+	 * SR_CONF_TRIGGER_ADV_CONFIG: string, JSON encoding of the full advanced
+	 *   trigger configuration (all stages with value0/value1/logic/inv/count,
+	 *   serial trigger params). Drivers parse what they need.
+	 */
+	SR_CONF_TRIGGER_ADV_MODE = 60095,   /* uint8 */
+	SR_CONF_TRIGGER_ADV_ENABLE,         /* 60096 — bool */
+	SR_CONF_TRIGGER_ADV_STAGES,         /* 60097 — uint8 */
+	SR_CONF_TRIGGER_ADV_CONFIG,         /* 60098 — string (JSON) */
+
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };
 
