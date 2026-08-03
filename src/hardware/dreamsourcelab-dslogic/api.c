@@ -1284,8 +1284,8 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(devc->clock_type);
 		break;
 	case SR_CONF_CLOCK_EDGE:
-		idx = devc->clock_edge ? 1 : 0;
-		*data = g_variant_new_string(signal_edges[idx]);
+		/* Return boolean to match hwdriver.c SR_T_BOOL and GUI bind_bool(). */
+		*data = g_variant_new_boolean(devc->clock_edge);
 		break;
 	case SR_CONF_OPERATION_MODE:
 		*data = g_variant_new_string(opmode_strs[devc->op_mode]);
@@ -1347,7 +1347,8 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_PROBE_COUPLING:
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		*data = g_variant_new_string(coupling_strs[DSL_CH_PRIV(ch)->coupling]);
+		/* Return int32 to match hwdriver.c SR_T_INT32 and demo driver. */
+		*data = g_variant_new_int32((int32_t)DSL_CH_PRIV(ch)->coupling);
 		break;
 	case SR_CONF_PROBE_OFFSET:
 		if (!ch || !ch->priv)
@@ -1387,16 +1388,16 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_uint64(dsl_channel_depth(sdi));
 		break;
 	case SR_CONF_VLD_CH_NUM:
-		*data = g_variant_new_int16(channel_modes[devc->ch_mode].vld_num);
+		*data = g_variant_new_int32(channel_modes[devc->ch_mode].vld_num);
 		break;
 	case SR_CONF_TOTAL_CH_NUM:
 		*data = g_variant_new_int16(devc->profile->dev_caps.total_ch_num);
 		break;
 	case SR_CONF_NUM_HDIV:
-		*data = g_variant_new_int16(10);
+		*data = g_variant_new_int32(10);
 		break;
 	case SR_CONF_NUM_VDIV:
-		*data = g_variant_new_int16(10);
+		*data = g_variant_new_int32(10);
 		break;
 	case SR_CONF_USB_SPEED:
 		*data = g_variant_new_string(
@@ -1432,10 +1433,11 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_TRIGGER_VALUE:
 		/* DSO trigger level (per-channel). Returns the software-side trig
 		 * value stored in dsl_channel_priv.trig_value (8-bit). The
-		 * hardware-side value is updated by get_measure() on receive. */
+		 * hardware-side value is updated by get_measure() on receive.
+		 * Return int32 to match hwdriver.c SR_T_INT32. */
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		*data = g_variant_new_byte(DSL_CH_PRIV(ch)->trig_value);
+		*data = g_variant_new_int32((int32_t)DSL_CH_PRIV(ch)->trig_value);
 		break;
 	case SR_CONF_PROBE_HW_OFFSET:
 		/* Hardware offset (per-channel). Read-only from GUI's perspective
@@ -1477,10 +1479,10 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(DSL_CH_PRIV(ch)->map_default);
 		break;
 	case SR_CONF_PROBE_MAP_UNIT:
-		/* Probe mapping unit index (into probe_map_units[]). */
+		/* Probe mapping unit (string from probe_map_units[]). */
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		*data = g_variant_new_int32(DSL_CH_PRIV(ch)->map_unit);
+		*data = g_variant_new_string(probe_map_units[DSL_CH_PRIV(ch)->map_unit]);
 		break;
 	case SR_CONF_PROBE_MAP_MIN:
 		/* Probe mapping minimum value (user-defined scale min). */
@@ -1552,9 +1554,8 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->clock_type = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_CLOCK_EDGE:
-		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(signal_edges))) < 0)
-			return SR_ERR_ARG;
-		devc->clock_edge = idx;
+		/* Accept boolean to match hwdriver.c SR_T_BOOL and GUI bind_bool(). */
+		devc->clock_edge = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_OPERATION_MODE:
 		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(opmode_strs))) < 0)
@@ -1762,7 +1763,8 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_PROBE_COUPLING:
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		DSL_CH_PRIV(ch)->coupling = g_variant_get_byte(data);
+		/* Accept int32 to match hwdriver.c SR_T_INT32 and demo driver. */
+		DSL_CH_PRIV(ch)->coupling = (uint8_t)g_variant_get_int32(data);
 		break;
 	case SR_CONF_PROBE_OFFSET:
 		if (!ch || !ch->priv)
@@ -1818,10 +1820,11 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_TRIGGER_VALUE:
 		/* DSO trigger level (per-channel). 8-bit value stored in
 		 * dsl_channel_priv.trig_value. For real hardware, the actual
-		 * trigger DAC is configured via dsl_wr_dso() in fpga_arm(). */
+		 * trigger DAC is configured via dsl_wr_dso() in fpga_arm().
+		 * Accept int32 to match hwdriver.c SR_T_INT32. */
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		DSL_CH_PRIV(ch)->trig_value = g_variant_get_byte(data);
+		DSL_CH_PRIV(ch)->trig_value = (uint8_t)g_variant_get_int32(data);
 		break;
 	case SR_CONF_PROBE_HW_OFFSET:
 		/* Hardware offset (per-channel). Normally auto-updated by
@@ -1838,10 +1841,12 @@ static int config_set(uint32_t key, GVariant *data,
 		DSL_CH_PRIV(ch)->map_default = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_PROBE_MAP_UNIT:
-		/* Probe mapping unit (index into probe_map_units[]). */
+		/* Probe mapping unit (string from probe_map_units[]). */
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
-		DSL_CH_PRIV(ch)->map_unit = g_variant_get_int32(data);
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(probe_map_units))) < 0)
+			return SR_ERR_ARG;
+		DSL_CH_PRIV(ch)->map_unit = idx;
 		break;
 	case SR_CONF_PROBE_MAP_MIN:
 		/* Probe mapping minimum value (user-defined scale min). */

@@ -178,7 +178,10 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Over-current protection active", NULL},
 	{SR_CONF_OVER_CURRENT_PROTECTION_THRESHOLD, SR_T_FLOAT, "ocp_threshold",
 		"Over-current protection threshold", NULL},
-	{SR_CONF_CLOCK_EDGE, SR_T_STRING, "clock_edge",
+	/* PXView fork: CLOCK_EDGE uses SR_T_BOOL. pxlogic driver and GUI bind_bool()
+	 * both use boolean. Upstream drivers use string; those are upstream
+	 * warnings only (listed in FORK_CHANGED_KEYS). */
+	{SR_CONF_CLOCK_EDGE, SR_T_BOOL, "clock_edge",
 		"Clock edge", NULL},
 	{SR_CONF_AMPLITUDE, SR_T_FLOAT, "amplitude",
 		"Amplitude", NULL},
@@ -298,7 +301,9 @@ static struct sr_key_info sr_key_info_config[] = {
 	/* Fork 60001-60013: keep original values */
 	{SR_CONF_LOOP_MODE, SR_T_BOOL, "loop_mode",
 		"Loop mode", NULL},
-	{SR_CONF_EX_TRIGGER_MATCH, SR_T_INT32, "ext_trigger_match",
+	/* PXView fork: EX_TRIGGER_MATCH uses SR_T_STRING. pxlogic driver uses string
+	 * for GET/SET (std_str_idx), GUI bind_list() sends/expects string. */
+	{SR_CONF_EX_TRIGGER_MATCH, SR_T_STRING, "ext_trigger_match",
 		"External trigger match", NULL},
 	{SR_CONF_TRIGGER_OUT, SR_T_BOOL, "trigger_out",
 		"Trigger output enable", NULL},
@@ -381,7 +386,9 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Reference minimum", NULL},
 	{SR_CONF_REF_MAX, SR_T_UINT32, "ref_max",
 		"Reference maximum", NULL},
-	{SR_CONF_UNIT_BITS, SR_T_UINT32, "unit_bits",
+	/* PXView fork: UNIT_BITS uses SR_T_UINT8. Both demo and DSL drivers use
+	 * g_variant_new_byte, GUI get_config_byte() reads as byte. */
+	{SR_CONF_UNIT_BITS, SR_T_UINT8, "unit_bits",
 		"Unit bits", NULL},
 	/* SR_CONF_PROBE_FACTOR already mapped upstream (line ~235). */
 	{SR_CONF_PROBE_MAP_UNIT, SR_T_STRING, "probe_map_unit",
@@ -402,7 +409,9 @@ static struct sr_key_info sr_key_info_config[] = {
 	{SR_CONF_ACTUAL_SAMPLES, SR_T_UINT64, "actual_samples",
 		"Actual samples", NULL},
 	{SR_CONF_FILE_VERSION, SR_T_UINT64, "file_version", "File version", NULL},
-	{SR_CONF_TOTAL_CH_NUM, SR_T_UINT8, "total_ch_num",
+	/* PXView fork: TOTAL_CH_NUM uses SR_T_INT16. DSL driver returns int16,
+	 * GUI get_config_int16() reads as int16 (no runtime type dispatch). */
+	{SR_CONF_TOTAL_CH_NUM, SR_T_INT16, "total_ch_num",
 		"Total channel number", NULL},
 	{SR_CONF_RLE_SUPPORT, SR_T_BOOL, "rle_support", "RLE support", NULL},
 	{SR_CONF_DSO_SYNC, SR_T_BOOL, "dso_sync", "DSO sync", NULL},

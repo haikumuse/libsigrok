@@ -220,7 +220,11 @@ struct demo_dso_measure {
 #define PATTERN_COUNT			50
 #define DEFAULT_LOGIC_FILE		"protocol"
 #define DEFAULT_DSO_FILE		"sine"
-#define DEFAULT_ANALOG_FILE		"sine"
+/* "random" = DEMO_GEN_RANDOM: use the math generator (per-channel patterns)
+ * instead of loading a .demo file. This lets each analog channel show a
+ * different waveform (sine/square/triangle/...) by default. Loading a
+ * .demo file replays the same data for all channels. */
+#define DEFAULT_ANALOG_FILE		"random"
 #define MAX_PROBE_NUM			32
 
 /* Pattern mode descriptor: a list of .demo file names (without .demo suffix).

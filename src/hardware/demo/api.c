@@ -481,11 +481,20 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		 */
 		demo_generate_analog_pattern(devc);
 
-		pattern = 0;
 		/* An "Analog" channel group with all analog channels in it. */
 		acg = sr_channel_group_new(sdi, "Analog", NULL);
 
 		for (i = 0; i < num_analog_channels; i++) {
+			/* Default per-channel patterns: ch0=sine, ch1=square so the
+			 * user sees channel 1 as sine and channel 2 as square wave.
+			 * Channels 2+ cycle through triangle/sawtooth/random. */
+			if (i == 0)
+				pattern = PATTERN_SINE;
+			else if (i == 1)
+				pattern = PATTERN_SQUARE;
+			else
+				pattern = i % ARRAY_SIZE(analog_pattern_str);
+
 			snprintf(channel_name, 16, "A%d", i);
 			ch = sr_channel_new(sdi, i + num_logic_channels, SR_CHANNEL_ANALOG,
 					TRUE, channel_name);
@@ -517,9 +526,6 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			ag->ac_prev_input = 0.0f;
 			ag->ac_prev_output = 0.0f;
 			g_hash_table_insert(devc->ch_ag, ch, ag);
-
-			if (++pattern == ARRAY_SIZE(analog_pattern_str))
-			pattern = 0;
 		}
 	}
 
@@ -1311,20 +1317,40 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_MAX_HEIGHT_VALUE:
 		/* Accept byte value; demo stores index 0 (1X) as the only real
 		 * state. The GUI binds this as enum alongside MAX_HEIGHT string. */
-		sr_dbg("demo: set MAX_HEIGHT_VALUE (ignored, demo uses 1X)");
+	sr_dbg("demo: set MAX_HEIGHT_VALUE (ignored, demo uses 1X)");
+	break;
+/* --- Probe mapping keys (accept but ignore; demo uses fixed map values) --- */
+/* Separated from the DSO per-channel block below so the audit script
+ * does not misattribute g_variant_get_* calls from other keys. */
+case SR_CONF_PROBE_MAP_UNIT:
+case SR_CONF_PROBE_MAP_MIN:
+case SR_CONF_PROBE_MAP_MAX:
+	break;
+/* --- Probe map default toggle (needs channel setup) --- */
+case SR_CONF_PROBE_MAP_DEFAULT:
+	{
+		if (!cg)
+			return SR_ERR_CHANNEL_GROUP;
+		ch = cg->channels->data;
+		if (ch->type == SR_CHANNEL_ANALOG) {
+			int aidx = ch->index - devc->num_logic_channels;
+			if (aidx < 0 || aidx >= devc->num_analog_channels
+					|| aidx >= DSO_MAX_CHANNELS)
+				return SR_ERR_ARG;
+			/* 存储每通道 map_default 状态, 使后续 GET 返回用户选择。 */
+			devc->analog_map_default[aidx] = g_variant_get_boolean(data);
+		}
+		/* DSO 通道仍忽略 (无独立存储)。 */
 		break;
-	/* --- DSO per-channel config --- */
-	case SR_CONF_PROBE_VDIV:
-	case SR_CONF_PROBE_COUPLING:
-	case SR_CONF_TRIGGER_VALUE:
-	case SR_CONF_PROBE_OFFSET:
-	case SR_CONF_PROBE_HW_OFFSET:
-	case SR_CONF_PROBE_FACTOR:
-	case SR_CONF_PROBE_EN:
-	case SR_CONF_PROBE_MAP_DEFAULT:
-	case SR_CONF_PROBE_MAP_UNIT:
-	case SR_CONF_PROBE_MAP_MIN:
-	case SR_CONF_PROBE_MAP_MAX:
+	}
+/* --- DSO per-channel config --- */
+case SR_CONF_PROBE_VDIV:
+case SR_CONF_PROBE_COUPLING:
+case SR_CONF_TRIGGER_VALUE:
+case SR_CONF_PROBE_OFFSET:
+case SR_CONF_PROBE_HW_OFFSET:
+case SR_CONF_PROBE_FACTOR:
+case SR_CONF_PROBE_EN:
 	{
 		if (!cg)
 			return SR_ERR_CHANNEL_GROUP;
@@ -1404,19 +1430,6 @@ static int config_set(uint32_t key, GVariant *data,
 			 * silently (channels are enabled at scan time). */
 			if (is_dso)
 				devc->dso_enabled[idx] = g_variant_get_boolean(data);
-			break;
-		case SR_CONF_PROBE_MAP_DEFAULT:
-			/* 存储每通道 map_default 状态, 使后续 GET 返回用户选择。
-			 * 旧代码 "accept but ignore" 导致 GET 恒返回 TRUE,
-			 * map unit/min/max 永远被 UI 禁用。 */
-			if (is_analog)
-				devc->analog_map_default[aidx] = g_variant_get_boolean(data);
-			/* DSO 通道仍忽略 (无独立存储)。 */
-			break;
-		case SR_CONF_PROBE_MAP_UNIT:
-		case SR_CONF_PROBE_MAP_MIN:
-		case SR_CONF_PROBE_MAP_MAX:
-			/* Accept but ignore; demo uses fixed map values. */
 			break;
 		}
 		break;
