@@ -474,6 +474,8 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Advanced trigger stage count", NULL},
 	{SR_CONF_TRIGGER_ADV_CONFIG, SR_T_STRING, "trigger_adv_config",
 		"Advanced trigger config (JSON)", NULL},
+	{SR_CONF_SESSION_TIME, SR_T_UINT64, "session_time",
+		"Session capture timestamp (ms since epoch)", NULL},
 	{SR_CONF_DEVICE_OPTIONS, SR_T_UINT64, "device_options",
 		"Device options", NULL},
 	{SR_CONF_DEVICE_SESSIONS, SR_T_UINT64, "device_sessions",

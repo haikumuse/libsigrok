@@ -236,6 +236,7 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 	int ret, i, j;
 	uint64_t tmp_u64;
 	int total_channels, total_analog, k;
+	int file_dev_mode = -1; /* device mode from header (LOGIC=0, DSO=1, ANALOG=2, MSO=3) */
 	GSList *l;
 	int unitsize = 0;
 	char **sections, **keys, *val;
@@ -318,9 +319,11 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 				 * registered in hwdriver.c). */
 				int dev_mode = g_key_file_get_integer(kf, sections[i],
 						keys[j], &error);
-				if (sdi && !error && dev_mode >= 0)
+				if (sdi && !error && dev_mode >= 0) {
+					file_dev_mode = dev_mode;
 					sr_config_set(sdi, NULL, SR_CONF_DEVICE_MODE,
 							g_variant_new_int16((int16_t)dev_mode));
+				}
 				g_clear_error(&error);
 			} else if (!strcmp(keys[j], "samplerate")) {
 					val = g_key_file_get_string(kf, sections[i],
@@ -334,6 +337,109 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 					g_free(val);
 					sr_config_set(sdi, NULL, SR_CONF_SAMPLERATE,
 							g_variant_new_uint64(tmp_u64));
+				} else if (!strcmp(keys[j], "total samples")) {
+					/* PXView v3: "total samples = N" records the
+					 * actual sample count saved in the file.
+					 * Without this, the session_driver reports
+					 * limit_samples=0, and the frontend falls back
+					 * to its default sample limit (e.g. 1M),
+					 * truncating loaded data to only a fraction
+					 * of the original capture. */
+					val = g_key_file_get_string(kf, sections[i],
+							keys[j], &error);
+					if (!sdi || !val || error) {
+						g_free(val);
+						g_clear_error(&error);
+						/* non-fatal: old files may lack this key */
+					} else {
+						tmp_u64 = g_ascii_strtoull(val, NULL, 10);
+						g_free(val);
+						sr_config_set(sdi, NULL, SR_CONF_LIMIT_SAMPLES,
+								g_variant_new_uint64(tmp_u64));
+					}
+				} else if (!strcmp(keys[j], "trigger pos")) {
+					/* "trigger pos = N" — sample offset of the trigger
+					 * point. Used by the frontend to position the trigger
+					 * marker correctly when reopening a .pxl file. */
+					val = g_key_file_get_string(kf, sections[i],
+							keys[j], &error);
+					if (sdi && val && !error) {
+						tmp_u64 = g_ascii_strtoull(val, NULL, 10);
+						sr_config_set(sdi, NULL, SR_CONF_TRIGGER_POS,
+								g_variant_new_uint64(tmp_u64));
+					}
+					g_free(val);
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "total blocks")) {
+					/* "total blocks = N" — number of data chunks
+					 * written to the file. Used by session_driver for
+					 * block iteration. */
+					val = g_key_file_get_string(kf, sections[i],
+							keys[j], &error);
+					if (sdi && val && !error) {
+						tmp_u64 = g_ascii_strtoull(val, NULL, 10);
+						sr_config_set(sdi, NULL, SR_CONF_NUM_BLOCKS,
+								g_variant_new_uint64(tmp_u64));
+					}
+					g_free(val);
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "trigger time")) {
+					/* "trigger time = N" — milliseconds since Unix
+					 * epoch, representing when the capture was taken.
+					 * Written by StoreSession::meta_gen() in all modes.
+					 * Exposed via SR_CONF_SESSION_TIME so the frontend
+					 * can restore the original capture timestamp. */
+					val = g_key_file_get_string(kf, sections[i],
+							keys[j], &error);
+					if (sdi && val && !error) {
+						gint64 trig_time = (gint64)g_ascii_strtoll(val, NULL, 10);
+						sr_config_set(sdi, NULL, SR_CONF_SESSION_TIME,
+								g_variant_new_int64(trig_time));
+					}
+					g_free(val);
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "hDiv")) {
+					/* "hDiv = N" — DSO horizontal timebase (ns/div).
+					 * Written in DSO mode by meta_gen(). */
+					val = g_key_file_get_string(kf, sections[i],
+							keys[j], &error);
+					if (sdi && val && !error) {
+						tmp_u64 = g_ascii_strtoull(val, NULL, 10);
+						sr_config_set(sdi, NULL, SR_CONF_TIMEBASE,
+								g_variant_new_uint64(tmp_u64));
+					}
+					g_free(val);
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "bits")) {
+					/* "bits = N" — ADC resolution in bits. Written in
+					 * DSO and ANALOG modes by meta_gen(). */
+					int bits_val = g_key_file_get_integer(kf, sections[i],
+							keys[j], &error);
+					if (sdi && !error && bits_val > 0) {
+						sr_config_set(sdi, NULL, SR_CONF_UNIT_BITS,
+								g_variant_new_byte((uint8_t)bits_val));
+					}
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "ref min")) {
+					/* "ref min = N" — ADC reference minimum. Written in
+					 * DSO and ANALOG modes by meta_gen(). */
+					int ref_val = g_key_file_get_integer(kf, sections[i],
+							keys[j], &error);
+					if (sdi && !error) {
+						sr_config_set(sdi, NULL, SR_CONF_REF_MIN,
+								g_variant_new_uint32((uint32_t)ref_val));
+					}
+					g_clear_error(&error);
+				} else if (!strcmp(keys[j], "ref max")) {
+					/* "ref max = N" — ADC reference maximum. Written in
+					 * DSO and ANALOG modes by meta_gen(). */
+					int ref_val = g_key_file_get_integer(kf, sections[i],
+							keys[j], &error);
+					if (sdi && !error) {
+						sr_config_set(sdi, NULL, SR_CONF_REF_MAX,
+								g_variant_new_uint32((uint32_t)ref_val));
+					}
+					g_clear_error(&error);
 				} else if (!strcmp(keys[j], "unitsize") && file_has_logic) {
 					unitsize = g_key_file_get_integer(kf, sections[i],
 							keys[j], &error);
@@ -364,21 +470,37 @@ SR_API int sr_session_load(struct sr_context *ctx, const char *filename,
 						sr_channel_new(sdi, k, SR_CHANNEL_LOGIC,
 								FALSE, channelname);
 					}
-				} else if (!strcmp(keys[j], "total analog")) {
-					total_analog = g_key_file_get_integer(kf,
-							sections[i], keys[j], &error);
-					if (!sdi || total_analog < 0 || error) {
-						ret = SR_ERR_DATA;
-						break;
-					}
-					sr_config_set(sdi, NULL, SR_CONF_NUM_ANALOG_CHANNELS,
-							g_variant_new_int32(total_analog));
-					for (k = total_channels; k < (total_channels + total_analog); k++) {
-						g_snprintf(channelname, sizeof(channelname),
-								"%d", k);
-						sr_channel_new(sdi, k, SR_CHANNEL_ANALOG,
-								FALSE, channelname);
-					}
+			} else if (!strcmp(keys[j], "total analog")) {
+				total_analog = g_key_file_get_integer(kf,
+						sections[i], keys[j], &error);
+				if (!sdi || total_analog < 0 || error) {
+					ret = SR_ERR_DATA;
+					break;
+				}
+				sr_config_set(sdi, NULL, SR_CONF_NUM_ANALOG_CHANNELS,
+						g_variant_new_int32(total_analog));
+				/* Determine channel type based on device mode.
+				 * DSO mode (1): channels are SR_CHANNEL_DSO.
+				 * ANALOG mode (2) / MSO mode (3): channels are SR_CHANNEL_ANALOG.
+				 * Default: SR_CHANNEL_ANALOG (upstream compat). */
+				int analog_ch_type = SR_CHANNEL_ANALOG;
+				if (file_dev_mode < 0) {
+					/* device mode key not yet parsed; read it directly */
+					GError *e2 = NULL;
+					int dm = g_key_file_get_integer(kf, sections[i],
+							"device mode", &e2);
+					if (!e2 && dm >= 0)
+						file_dev_mode = dm;
+					g_clear_error(&e2);
+				}
+				if (file_dev_mode == 1) /* DSO */
+					analog_ch_type = SR_CHANNEL_DSO;
+				for (k = total_channels; k < (total_channels + total_analog); k++) {
+					g_snprintf(channelname, sizeof(channelname),
+							"%d", k);
+					sr_channel_new(sdi, k, analog_ch_type,
+							FALSE, channelname);
+				}
 				} else if (!strncmp(keys[j], "probe", 5) && g_ascii_isdigit(keys[j][5])) {
 				tmp_u64 = g_ascii_strtoull(keys[j] + 5, NULL, 10);
 				if (!sdi || tmp_u64 > G_MAXINT) {

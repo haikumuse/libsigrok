@@ -1509,6 +1509,12 @@ enum sr_configkey {
 	SR_CONF_TRIGGER_ADV_STAGES,         /* 60097 — uint8 */
 	SR_CONF_TRIGGER_ADV_CONFIG,         /* 60098 — string (JSON) */
 
+	/* SR_CONF_SESSION_TIME: int64, milliseconds since Unix epoch.
+	 * Written by StoreSession::meta_gen() as "trigger time" in the .pxl
+	 * header. Parsed by session_file.c on load and exposed via config_get
+	 * so the frontend can restore the original capture timestamp. */
+	SR_CONF_SESSION_TIME,               /* 60099 — int64 */
+
 	/* Update sr_key_info_config[] (hwdriver.c) upon changes! */
 };
 

@@ -43,6 +43,7 @@ struct session_vdev {
 	struct zip_file *capfile;
 	int bytes_read;
 	uint64_t samplerate;
+	uint64_t total_samples;
 	int unitsize;
 	int num_logic_channels;
 	int num_analog_channels;
@@ -65,6 +66,17 @@ struct session_vdev {
 	 * Exposed via SR_CONF_DEVICE_MODE so PXView can restore the
 	 * correct work mode when opening a .pxl file. */
 	int pxv_device_mode;
+	/* Device-level settings parsed from header by session_file.c.
+	 * These are written by StoreSession::meta_gen() and must be
+	 * restored on load so the frontend can display correct trigger
+	 * position, DSO timebase, reference ranges, etc. */
+	uint64_t trig_pos;       /* "trigger pos" — sample offset of trigger */
+	uint64_t timebase;       /* "hDiv" — DSO horizontal timebase */
+	uint8_t unit_bits;       /* "bits" — ADC resolution (DSO/ANALOG) */
+	uint32_t ref_min;        /* "ref min" — ADC reference minimum */
+	uint32_t ref_max;        /* "ref max" — ADC reference maximum */
+	uint64_t num_blocks;     /* "total blocks" — data block count */
+	int64_t session_time;    /* "trigger time" — ms since epoch (capture timestamp) */
 };
 
 static const uint32_t devopts[] = {
@@ -75,6 +87,14 @@ static const uint32_t devopts[] = {
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_SESSIONFILE | SR_CONF_SET,
 	SR_CONF_DEVICE_MODE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_POS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TIMEBASE | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_UNIT_BITS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_REF_MIN | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_REF_MAX | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_NUM_BLOCKS | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_SESSION_TIME | SR_CONF_GET | SR_CONF_SET,
 };
 
 /*
@@ -321,8 +341,116 @@ static gboolean stream_pxv_analog_data(struct sr_dev_inst *sdi)
 }
 
 /*
+ * Stream PXView v3 DSO data: per-channel chunks (O-<ch>/0).
+ * Each chunk contains one channel's raw sample bytes (1 byte per sample).
+ * We read all enabled DSO channels' chunks, interleave them into
+ * sr_datafeed_dso format, and send SR_DF_DSO packets.
+ */
+static gboolean stream_pxv_dso_data(struct sr_dev_inst *sdi)
+{
+	struct session_vdev *vdev;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_dso dso;
+	struct zip_stat zs;
+	char chunkname[32];
+	struct zip_file *zf;
+	struct sr_channel *ch_struct;
+	GSList *ch_list;
+	GSList *dso_ch_list = NULL;
+	int dso_count = 0;
+	int unit_bytes = 1; /* DSO samples are 1 byte each */
+	uint8_t *buf = NULL;
+	uint8_t *interleaved = NULL;
+	uint64_t total_samples = 0;
+	int ch_idx;
+
+	vdev = sdi->priv;
+
+	/* Collect all enabled DSO channels */
+	for (ch_list = sdi->channels; ch_list; ch_list = ch_list->next) {
+		ch_struct = ch_list->data;
+		if (ch_struct->type == SR_CHANNEL_DSO && ch_struct->enabled) {
+			dso_ch_list = g_slist_append(dso_ch_list, ch_struct);
+			dso_count++;
+		}
+	}
+	if (dso_count <= 0) {
+		g_slist_free(dso_ch_list);
+		return FALSE;
+	}
+
+	/* Read first channel's chunk to determine total sample count */
+	ch_struct = dso_ch_list->data;
+	ch_idx = ch_struct->index;
+	snprintf(chunkname, sizeof(chunkname), "O-%d/0", ch_idx);
+	if (zip_stat(vdev->archive, chunkname, 0, &zs) < 0) {
+		g_slist_free(dso_ch_list);
+		return FALSE;  /* No DSO data */
+	}
+	total_samples = zs.size / unit_bytes;
+
+	if (total_samples == 0) {
+		g_slist_free(dso_ch_list);
+		return FALSE;
+	}
+
+	/* Allocate interleaved buffer: total_samples * dso_count bytes */
+	interleaved = g_malloc0(total_samples * dso_count);
+	if (!interleaved) {
+		g_slist_free(dso_ch_list);
+		return FALSE;
+	}
+
+	/* Read each channel's data and interleave */
+	int ch_ordinal = 0;
+	for (GSList *l = dso_ch_list; l; l = l->next) {
+		ch_struct = l->data;
+		ch_idx = ch_struct->index;
+		snprintf(chunkname, sizeof(chunkname), "O-%d/0", ch_idx);
+		if (zip_stat(vdev->archive, chunkname, 0, &zs) >= 0) {
+			zf = zip_fopen(vdev->archive, chunkname, 0);
+			if (zf) {
+				buf = g_malloc(zs.size);
+				if (zip_fread(zf, buf, zs.size) == (int)zs.size) {
+					/* Interleave: [s0_ch0][s0_ch1]...[s1_ch0]... */
+					for (uint64_t s = 0; s < total_samples; s++) {
+						interleaved[s * dso_count + ch_ordinal] = buf[s];
+					}
+				} else {
+					sr_warn("Short read on %s.", chunkname);
+				}
+				zip_fclose(zf);
+				g_free(buf);
+			}
+		}
+		ch_ordinal++;
+	}
+
+	/* Send as a single SR_DF_DSO packet */
+	packet.type = SR_DF_DSO;
+	packet.payload = &dso;
+	memset(&dso, 0, sizeof(dso));
+	dso.data = interleaved;
+	dso.num_samples = (uint32_t)total_samples;
+	dso.en_ch_num = (uint8_t)dso_count;
+	dso.sample_bits = vdev->unit_bits ? vdev->unit_bits : 8;
+	dso.trig_flag = 0;
+	dso.trig_ch = 0;
+	dso.trig_offset = 0;
+
+	vdev->bytes_read += total_samples * dso_count;
+	sr_session_send(sdi, &packet);
+
+	g_free(interleaved);
+	g_slist_free(dso_ch_list);
+
+	return TRUE;
+}
+
+/*
  * PXView v3 流式读取分派器：先读 logic 块（L-<ch>/<block>），
- * logic 块读完后切换到 analog 块（A-0/<block>）。
+ * logic 块读完后切换到 analog 块（A-0/<block>），
+ * analog 块读完后切换到 DSO 块（O-<ch>/0）。
  */
 static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
 {
@@ -340,7 +468,16 @@ static gboolean stream_pxv_session_data(struct sr_dev_inst *sdi)
 
 	/* Phase 1: 读取 analog 块 */
 	if (vdev->pxv_phase == 1) {
-		return stream_pxv_analog_data(sdi);
+		gboolean got = stream_pxv_analog_data(sdi);
+		if (got)
+			return TRUE;
+		/* analog 块读完，切换到 DSO 阶段 */
+		vdev->pxv_phase = 2;
+	}
+
+	/* Phase 2: 读取 DSO 块 */
+	if (vdev->pxv_phase == 2) {
+		return stream_pxv_dso_data(sdi);
 	}
 
 	return FALSE;
@@ -570,6 +707,30 @@ static int config_get(uint32_t key, GVariant **data,
 	case SR_CONF_DEVICE_MODE:
 		*data = g_variant_new_int16((int16_t)vdev->pxv_device_mode);
 		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		*data = g_variant_new_uint64(vdev->total_samples);
+		break;
+	case SR_CONF_TRIGGER_POS:
+		*data = g_variant_new_uint64(vdev->trig_pos);
+		break;
+	case SR_CONF_TIMEBASE:
+		*data = g_variant_new_uint64(vdev->timebase);
+		break;
+	case SR_CONF_UNIT_BITS:
+		*data = g_variant_new_byte(vdev->unit_bits);
+		break;
+	case SR_CONF_REF_MIN:
+		*data = g_variant_new_uint32(vdev->ref_min);
+		break;
+	case SR_CONF_REF_MAX:
+		*data = g_variant_new_uint32(vdev->ref_max);
+		break;
+	case SR_CONF_NUM_BLOCKS:
+		*data = g_variant_new_uint64(vdev->num_blocks);
+		break;
+	case SR_CONF_SESSION_TIME:
+		*data = g_variant_new_int64(vdev->session_time);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -590,6 +751,10 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_SAMPLERATE:
 		vdev->samplerate = g_variant_get_uint64(data);
 		sr_info("Setting samplerate to %" PRIu64 ".", vdev->samplerate);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		vdev->total_samples = g_variant_get_uint64(data);
+		sr_info("Setting total samples to %" PRIu64 ".", vdev->total_samples);
 		break;
 	case SR_CONF_SESSIONFILE:
 		g_free(vdev->sessionfile);
@@ -617,6 +782,27 @@ static int config_set(uint32_t key, GVariant *data,
 		 * and the int16 variant passed by session_file.c / DeviceAgent. */
 		vdev->pxv_device_mode = g_variant_get_int16(data);
 		sr_info("Setting PXView device mode to %d.", vdev->pxv_device_mode);
+		break;
+	case SR_CONF_TRIGGER_POS:
+		vdev->trig_pos = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_TIMEBASE:
+		vdev->timebase = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_UNIT_BITS:
+		vdev->unit_bits = g_variant_get_byte(data);
+		break;
+	case SR_CONF_REF_MIN:
+		vdev->ref_min = g_variant_get_uint32(data);
+		break;
+	case SR_CONF_REF_MAX:
+		vdev->ref_max = g_variant_get_uint32(data);
+		break;
+	case SR_CONF_NUM_BLOCKS:
+		vdev->num_blocks = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_SESSION_TIME:
+		vdev->session_time = g_variant_get_int64(data);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -696,6 +882,25 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 				vdev->pxv_format = TRUE;
 				sr_info("Detected PXView v3 per-channel "
 					"chunked format (analog).");
+			}
+		}
+
+		/* DSO 数据检测：检查 O-<ch>/0 块。
+		 * 纯 DSO 文件（无 logic/analog 块）也走 v3 路径。 */
+		if (!vdev->pxv_format) {
+			for (l = sdi->channels; l; l = l->next) {
+				ch_tmp = l->data;
+				if (ch_tmp->type == SR_CHANNEL_DSO && ch_tmp->enabled) {
+					char tmp_name[32];
+					snprintf(tmp_name, sizeof(tmp_name),
+						"O-%d/0", ch_tmp->index);
+					if (zip_stat(vdev->archive, tmp_name, 0, &zs) >= 0) {
+						vdev->pxv_format = TRUE;
+						sr_info("Detected PXView v3 per-channel "
+							"chunked format (DSO).");
+					}
+					break;
+				}
 			}
 		}
 
