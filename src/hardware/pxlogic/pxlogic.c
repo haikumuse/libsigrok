@@ -71,6 +71,16 @@ static const char *filter_modes[] = {
     [1] = "1 Sample Clock",
 };
 
+/* Clock edge string array for config_list (g_variant_new_strv) and
+ * config_set (std_str_idx). Indexed 0..1 — entry 0 is rising edge
+ * (devc->clock_edge == 0, positive edge), entry 1 is falling edge
+ * (devc->clock_edge == 1, negative edge). Hardware path uses
+ * (devc->clock_edge << 3) in the GPIO mode register. */
+static const char *signal_edges[] = {
+    [0] = "rising",
+    [1] = "falling",
+};
+
 enum pxlogic_extern_edge_modes {
     PX_TRIGGER_CLOSE,
     PX_TRIGGER_RISING,
@@ -992,7 +1002,9 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         break;
 
     case SR_CONF_CLOCK_EDGE:
-        *data = g_variant_new_boolean(devc->clock_edge);
+        /* Return string to match config_list (g_variant_new_strv) and the
+         * GUI bind_list dropdown. devc->clock_edge is 0 (rising) or 1 (falling). */
+        *data = g_variant_new_string(signal_edges[devc->clock_edge ? 1 : 0]);
         break;
     case SR_CONF_TRIGGER_OUT:
         *data = g_variant_new_boolean(devc->trig_out_en);
@@ -1291,7 +1303,13 @@ static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sd
         ret = SR_OK;
         devc->vth = g_variant_get_double(data);
     } else if (key == SR_CONF_CLOCK_EDGE) {
-        devc->clock_edge = g_variant_get_boolean(data);
+        /* Accept string from config_list dropdown. Validate via std_str_idx
+         * against signal_edges[]. devc->clock_edge stores 0 (rising) or
+         * 1 (falling); hardware path uses (devc->clock_edge << 3). */
+        int eidx = std_str_idx(data, ARRAY_AND_SIZE(signal_edges));
+        if (eidx < 0)
+            return SR_ERR_ARG;
+        devc->clock_edge = eidx;
     } else if (key == SR_CONF_TRIGGER_OUT) {
         devc->trig_out_en = g_variant_get_boolean(data);
     } else if (key == SR_CONF_FILTER) {
@@ -1458,6 +1476,9 @@ static int config_list(uint32_t key, GVariant **data, const struct sr_dev_inst *
     }
     case SR_CONF_FILTER:
         *data = g_variant_new_strv(ARRAY_AND_SIZE(filter_modes));
+        break;
+    case SR_CONF_CLOCK_EDGE:
+        *data = g_variant_new_strv(ARRAY_AND_SIZE(signal_edges));
         break;
     default:
         return SR_ERR_NA;

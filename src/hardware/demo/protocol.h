@@ -400,6 +400,38 @@ struct dev_context {
 	char *demo_file_path;
 	/* Number of enabled probes (set by SR_CONF_CAPTURE_NUM_PROBES). */
 	int num_probes;
+
+	/* --- PXLogic-compatible test keys (for UI testing without hardware) --- */
+	/* Voltage threshold (adjustable). */
+	double vth;
+	/* Glitch filter: 0=None, 1=1 Sample Clock. */
+	int filter;
+	/* Clock edge: 0=rising, 1=falling. */
+	int clock_edge;
+	/* External clock enable. */
+	gboolean clock_type;
+	/* Trigger output enable. */
+	gboolean trig_out_en;
+	/* RLE compression enable. */
+	gboolean rle;
+	/* External trigger match mode (index into extern_trigger_match_strs). */
+	int ext_trig_mode;
+	/* Threshold select (index into threshold_strs). */
+	int threshold_sel;
+	/* Buffer options (index into buffer_option_strs). */
+	int buffer_options;
+	/* Bandwidth limit string (stored as int index). */
+	int bw_limit;
+
+	/* PWM0 output: when enabled, overrides channel 7's logic data with a
+	 * square wave at the specified frequency and duty cycle. */
+	gboolean pwm0_en;
+	double pwm0_freq;
+	double pwm0_duty;
+	/* PWM1 output (not connected to any channel; for UI testing). */
+	gboolean pwm1_en;
+	double pwm1_freq;
+	double pwm1_duty;
 };
 
 struct analog_gen {

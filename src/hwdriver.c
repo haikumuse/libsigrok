@@ -178,10 +178,11 @@ static struct sr_key_info sr_key_info_config[] = {
 		"Over-current protection active", NULL},
 	{SR_CONF_OVER_CURRENT_PROTECTION_THRESHOLD, SR_T_FLOAT, "ocp_threshold",
 		"Over-current protection threshold", NULL},
-	/* PXView fork: CLOCK_EDGE uses SR_T_BOOL. pxlogic driver and GUI bind_bool()
-	 * both use boolean. Upstream drivers use string; those are upstream
-	 * warnings only (listed in FORK_CHANGED_KEYS). */
-	{SR_CONF_CLOCK_EDGE, SR_T_BOOL, "clock_edge",
+	/* CLOCK_EDGE uses SR_T_STRING. Drivers (pxlogic, dslogic) return a string
+	 * from config_get ("rising"/"falling") and accept a string in config_set.
+	 * config_list returns signal_edges[] = {"rising", "falling"}. The GUI binds
+	 * it as a dropdown (bind_list) when the driver advertises SR_CONF_LIST. */
+	{SR_CONF_CLOCK_EDGE, SR_T_STRING, "clock_edge",
 		"Clock edge", NULL},
 	{SR_CONF_AMPLITUDE, SR_T_FLOAT, "amplitude",
 		"Amplitude", NULL},

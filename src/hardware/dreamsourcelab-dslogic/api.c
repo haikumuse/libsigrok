@@ -1284,8 +1284,8 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_boolean(devc->clock_type);
 		break;
 	case SR_CONF_CLOCK_EDGE:
-		/* Return boolean to match hwdriver.c SR_T_BOOL and GUI bind_bool(). */
-		*data = g_variant_new_boolean(devc->clock_edge);
+		/* Return string to match config_list signal_edges[] and GUI bind_list. */
+		*data = g_variant_new_string(signal_edges[devc->clock_edge ? 1 : 0]);
 		break;
 	case SR_CONF_OPERATION_MODE:
 		*data = g_variant_new_string(opmode_strs[devc->op_mode]);
@@ -1554,8 +1554,11 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->clock_type = g_variant_get_boolean(data);
 		break;
 	case SR_CONF_CLOCK_EDGE:
-		/* Accept boolean to match hwdriver.c SR_T_BOOL and GUI bind_bool(). */
-		devc->clock_edge = g_variant_get_boolean(data);
+		/* Accept string from config_list dropdown. Validate via std_str_idx
+		 * against signal_edges[]. devc->clock_edge stores 0/1. */
+		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(signal_edges))) < 0)
+			return SR_ERR_ARG;
+		devc->clock_edge = idx;
 		break;
 	case SR_CONF_OPERATION_MODE:
 		if ((idx = std_str_idx(data, ARRAY_AND_SIZE(opmode_strs))) < 0)

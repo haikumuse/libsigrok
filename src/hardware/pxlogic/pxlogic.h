@@ -422,7 +422,7 @@ static const uint32_t devopts[] = {
     SR_CONF_VTH             | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_EX_TRIGGER_MATCH| SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
     SR_CONF_FILTER          | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-    SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET,
+    SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
     SR_CONF_TRIGGER_OUT     | SR_CONF_GET | SR_CONF_SET,
     SR_CONF_TRIGGER_MATCH   | SR_CONF_LIST,
     /* Advanced trigger configuration (PXView-local extension keys).

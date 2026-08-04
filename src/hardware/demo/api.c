@@ -154,6 +154,25 @@ static const uint32_t devopts[] = {
 	SR_CONF_NUM_BLOCKS | SR_CONF_GET | SR_CONF_SET,
 	/* Max DSO sample limits (SR_KHZ(20) = 20000). */
 	SR_CONF_MAX_DSO_SAMPLELIMITS | SR_CONF_GET,
+	/* --- PXLogic-compatible test keys (for UI testing without hardware) --- */
+	 * These mirror the pxlogic driver's Mode section so the user can test
+	 * all device-options dock controls with the demo device. */
+	SR_CONF_VTH             | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_FILTER          | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_CLOCK_EDGE      | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_CLOCK_TYPE      | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_TRIGGER_OUT     | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_RLE             | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_EX_TRIGGER_MATCH| SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_THRESHOLD       | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_BUFFER_OPTIONS  | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_BANDWIDTH_LIMIT | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_PWM0_EN         | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PWM0_FREQ       | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PWM0_DUTY       | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PWM1_EN         | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PWM1_FREQ       | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_PWM1_DUTY       | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint32_t devopts_cg_logic[] = {
@@ -274,6 +293,33 @@ static const char *dso_pattern_strs[] = {
 	"square",
 	"sawtooth",
 	"triangle",
+};
+
+/* --- PXLogic-compatible string arrays for UI testing --- */
+/* Clock edge strings (matches pxlogic/dslogic signal_edges[]). */
+static const char *demo_signal_edges[] = { "rising", "falling" };
+
+/* Filter mode strings (matches pxlogic filter_modes[]). */
+static const char *demo_filter_modes[] = { "None", "1 Sample Clock" };
+
+/* External trigger match strings (matches pxlogic extern_trigger_match_strs[]). */
+static const char *demo_extern_trig_strs[] = {
+	"Close", "Rising", "One", "Falling", "Zero", "Edge",
+};
+
+/* Threshold select strings (matches pxlogic/dslogic threshold selections). */
+static const char *demo_threshold_strs[] = {
+	"1.8V", "2.5V", "3.3V", "5.0V",
+};
+
+/* Buffer option strings. */
+static const char *demo_buffer_options_strs[] = {
+	"Buffer Mode", "Stream Mode",
+};
+
+/* Bandwidth limit strings. */
+static const char *demo_bw_limit_strs[] = {
+	"20M", "30M", "40M", "50M", "60M", "70M", "80M", "90M", "100M",
 };
 
 /* Logic channel-mode descriptor table. Each entry trades channel count for
@@ -471,6 +517,24 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->num_probes = num_logic_channels;
 	devc->archive = NULL;
 	devc->mstatus.measure_valid = TRUE;
+
+	/* --- PXLogic-compatible test field defaults --- */
+	devc->vth = 2.0;
+	devc->filter = 0;
+	devc->clock_edge = 0;
+	devc->clock_type = FALSE;
+	devc->trig_out_en = FALSE;
+	devc->rle = FALSE;
+	devc->ext_trig_mode = 0;
+	devc->threshold_sel = 2; /* 3.3V */
+	devc->buffer_options = 0;
+	devc->bw_limit = 0;
+	devc->pwm0_en = FALSE;
+	devc->pwm0_freq = 1000.0;
+	devc->pwm0_duty = 50.0;
+	devc->pwm1_en = FALSE;
+	devc->pwm1_freq = 1000.0;
+	devc->pwm1_duty = 50.0;
 
 	if (num_logic_channels > 0) {
 		/* Logic channels, all in one channel group. */
@@ -994,7 +1058,26 @@ static int config_get(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
-/* Type-check helper for config_set entry points. Verifies the GVariant type
+/* --- PXLogic-compatible config_get cases (device-level, cg=NULL) ---
+ * Returns the current value for each test key. These are only reached when
+ * cg is NULL (device-level query from the DeviceOptionsDock Mode section). */
+#define DEMO_GET_PXLOGIC_KEYS() \
+	case SR_CONF_VTH: *data = g_variant_new_double(devc->vth); break; \
+	case SR_CONF_FILTER: *data = g_variant_new_string(demo_filter_modes[devc->filter]); break; \
+	case SR_CONF_CLOCK_EDGE: *data = g_variant_new_string(demo_signal_edges[devc->clock_edge]); break; \
+	case SR_CONF_CLOCK_TYPE: *data = g_variant_new_boolean(devc->clock_type); break; \
+	case SR_CONF_TRIGGER_OUT: *data = g_variant_new_boolean(devc->trig_out_en); break; \
+	case SR_CONF_RLE: *data = g_variant_new_boolean(devc->rle); break; \
+	case SR_CONF_EX_TRIGGER_MATCH: *data = g_variant_new_string(demo_extern_trig_strs[devc->ext_trig_mode]); break; \
+	case SR_CONF_THRESHOLD: *data = g_variant_new_string(demo_threshold_strs[devc->threshold_sel]); break; \
+	case SR_CONF_BUFFER_OPTIONS: *data = g_variant_new_string(demo_buffer_options_strs[devc->buffer_options]); break; \
+	case SR_CONF_BANDWIDTH_LIMIT: *data = g_variant_new_string(demo_bw_limit_strs[devc->bw_limit]); break; \
+	case SR_CONF_PWM0_EN: *data = g_variant_new_boolean(devc->pwm0_en); break; \
+	case SR_CONF_PWM0_FREQ: *data = g_variant_new_double(devc->pwm0_freq); break; \
+	case SR_CONF_PWM0_DUTY: *data = g_variant_new_double(devc->pwm0_duty); break; \
+	case SR_CONF_PWM1_EN: *data = g_variant_new_boolean(devc->pwm1_en); break; \
+	case SR_CONF_PWM1_FREQ: *data = g_variant_new_double(devc->pwm1_freq); break; \
+	case SR_CONF_PWM1_DUTY: *data = g_variant_new_double(devc->pwm1_duty); break;
  * matches the expected type string (e.g. "i" for int32, "t" for uint64).
  * sr_variant_type_check in hwdriver.c already validates types before the
  * driver's config_set runs, but this provides a driver-level diagnostic
