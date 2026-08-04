@@ -19,6 +19,7 @@
 
 #include <config.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -150,6 +151,37 @@ static int reset(struct sr_input *in)
 	return SR_OK;
 }
 
+/*
+ * Auto-detect raw binary files by filename extension.
+ *
+ * Raw binary data has no header, no magic bytes, and no metadata — it is
+ * impossible to distinguish from any other sequence of bytes. The only
+ * available signal is the file extension. We use a very low confidence
+ * (high numeric value) so that any other module with content-based
+ * matching (magic bytes, headers) always takes precedence.
+ */
+static int format_match(GHashTable *metadata, unsigned int *confidence)
+{
+	static const char *binary_ext = ".binary";
+	const char *fn;
+	size_t fn_len, ext_len;
+
+	fn = g_hash_table_lookup(metadata,
+			GINT_TO_POINTER(SR_INPUT_META_FILENAME));
+	if (!fn || !*fn)
+		return SR_ERR;
+
+	fn_len = strlen(fn);
+	ext_len = strlen(binary_ext);
+	if (fn_len >= ext_len &&
+	    g_ascii_strcasecmp(&fn[fn_len - ext_len], binary_ext) == 0) {
+		*confidence = 100;
+		return SR_OK;
+	}
+
+	return SR_ERR;
+}
+
 static struct sr_option options[] = {
 	{ "numchannels", "Number of logic channels", "The number of (logic) channels in the data", NULL, NULL },
 	{ "samplerate", "Sample rate (Hz)", "The sample rate of the (logic) data in Hz", NULL, NULL },
@@ -170,8 +202,10 @@ SR_PRIV struct sr_input_module input_binary = {
 	.id = "binary",
 	.name = "Binary",
 	.desc = "Raw binary logic data",
-	.exts = NULL,
+	.exts = (const char*[]) {"binary", NULL},
+	.metadata = { SR_INPUT_META_FILENAME },
 	.options = get_options,
+	.format_match = format_match,
 	.init = init,
 	.receive = receive,
 	.end = end,

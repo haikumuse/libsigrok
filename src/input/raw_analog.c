@@ -279,12 +279,43 @@ static int reset(struct sr_input *in)
 	return SR_OK;
 }
 
+/*
+ * Auto-detect raw analog files by filename extension.
+ * Raw analog data has no header — only the .raw extension can be used.
+ * Use very low confidence (high numeric value) so content-based modules
+ * always take precedence. Note: .bin is NOT matched here because the
+ * saleae module also claims .bin and has content-based detection.
+ */
+static int format_match(GHashTable *metadata, unsigned int *confidence)
+{
+	static const char *raw_ext = ".raw";
+	const char *fn;
+	size_t fn_len, ext_len;
+
+	fn = g_hash_table_lookup(metadata,
+			GINT_TO_POINTER(SR_INPUT_META_FILENAME));
+	if (!fn || !*fn)
+		return SR_ERR;
+
+	fn_len = strlen(fn);
+	ext_len = strlen(raw_ext);
+	if (fn_len >= ext_len &&
+	    g_ascii_strcasecmp(&fn[fn_len - ext_len], raw_ext) == 0) {
+		*confidence = 100;
+		return SR_OK;
+	}
+
+	return SR_ERR;
+}
+
 SR_PRIV struct sr_input_module input_raw_analog = {
 	.id = "raw_analog",
 	.name = "RAW analog",
 	.desc = "Raw analog data without header",
 	.exts = (const char*[]){"raw", "bin", NULL},
+	.metadata = { SR_INPUT_META_FILENAME },
 	.options = get_options,
+	.format_match = format_match,
 	.init = init,
 	.receive = receive,
 	.end = end,

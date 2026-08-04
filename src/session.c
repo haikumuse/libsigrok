@@ -792,7 +792,8 @@ SR_API int sr_session_start(struct sr_session *session)
 		}
 		if (!c) {
 			sr_err("%s device %s has no enabled channels.",
-				sdi->driver->name, sdi->connection_id);
+				sdi->driver ? sdi->driver->name : "(none)",
+				sdi->connection_id ? sdi->connection_id : "(none)");
 			return SR_ERR;
 		}
 
@@ -800,7 +801,8 @@ SR_API int sr_session_start(struct sr_session *session)
 		if (ret != SR_OK) {
 			sr_err("Failed to commit %s device %s settings "
 				"before starting acquisition.",
-				sdi->driver->name, sdi->connection_id);
+				sdi->driver ? sdi->driver->name : "(none)",
+				sdi->connection_id ? sdi->connection_id : "(none)");
 			return ret;
 		}
 	}
