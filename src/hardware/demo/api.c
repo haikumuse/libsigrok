@@ -154,7 +154,7 @@ static const uint32_t devopts[] = {
 	SR_CONF_NUM_BLOCKS | SR_CONF_GET | SR_CONF_SET,
 	/* Max DSO sample limits (SR_KHZ(20) = 20000). */
 	SR_CONF_MAX_DSO_SAMPLELIMITS | SR_CONF_GET,
-	/* --- PXLogic-compatible test keys (for UI testing without hardware) --- */
+	/* PXLogic-compatible test keys (for UI testing without hardware).
 	 * These mirror the pxlogic driver's Mode section so the user can test
 	 * all device-options dock controls with the demo device. */
 	SR_CONF_VTH             | SR_CONF_GET | SR_CONF_SET,
