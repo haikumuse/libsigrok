@@ -423,12 +423,13 @@ struct dev_context {
 	/* Bandwidth limit string (stored as int index). */
 	int bw_limit;
 
-	/* PWM0 output: when enabled, overrides channel 7's logic data with a
+	/* PWM0 output: when enabled, overrides channel 6's logic data with a
 	 * square wave at the specified frequency and duty cycle. */
 	gboolean pwm0_en;
 	double pwm0_freq;
 	double pwm0_duty;
-	/* PWM1 output (not connected to any channel; for UI testing). */
+	/* PWM1 output: when enabled, overrides channel 7's logic data with a
+	 * square wave at the specified frequency and duty cycle. */
 	gboolean pwm1_en;
 	double pwm1_freq;
 	double pwm1_duty;

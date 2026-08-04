@@ -369,6 +369,34 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 		sr_err("Unknown pattern: %d.", devc->logic_pattern);
 		break;
 	}
+
+	/* PWM override: when enabled, PWM0 replaces channel 6's bit and
+	 * PWM1 replaces channel 7's bit with a square wave generated from
+	 * the user-configured frequency and duty cycle. */
+	if (devc->pwm0_en || devc->pwm1_en) {
+		uint64_t sample_index;
+		for (i = 0; i < size; i += devc->logic_unitsize) {
+			/* Absolute sample index = sent_samples + (this sample offset). */
+			sample_index = devc->sent_samples + (i / devc->logic_unitsize);
+			if (devc->pwm0_en && devc->pwm0_freq > 0) {
+				/* Period in samples = samplerate / frequency. */
+				uint64_t period = (uint64_t)(devc->cur_samplerate / devc->pwm0_freq);
+				if (period == 0) period = 1;
+				uint64_t high_samples = (uint64_t)(period * devc->pwm0_duty / 100.0);
+				if (high_samples == 0) high_samples = 1;
+				uint8_t bit_val = ((sample_index % period) < high_samples) ? 0x40 : 0x00;
+				devc->logic_data[i] = (devc->logic_data[i] & ~0x40) | bit_val;
+			}
+			if (devc->pwm1_en && devc->pwm1_freq > 0) {
+				uint64_t period = (uint64_t)(devc->cur_samplerate / devc->pwm1_freq);
+				if (period == 0) period = 1;
+				uint64_t high_samples = (uint64_t)(period * devc->pwm1_duty / 100.0);
+				if (high_samples == 0) high_samples = 1;
+				uint8_t bit_val = ((sample_index % period) < high_samples) ? 0x80 : 0x00;
+				devc->logic_data[i] = (devc->logic_data[i] & ~0x80) | bit_val;
+			}
+		}
+	}
 }
 
 /*

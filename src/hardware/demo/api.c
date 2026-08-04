@@ -1051,6 +1051,55 @@ static int config_get(uint32_t key, GVariant **data,
 		}
 		break;
 	}
+	/* --- PXLogic-compatible test keys (device-level) --- */
+	case SR_CONF_VTH:
+		*data = g_variant_new_double(devc->vth);
+		break;
+	case SR_CONF_FILTER:
+		*data = g_variant_new_string(demo_filter_modes[devc->filter]);
+		break;
+	case SR_CONF_CLOCK_EDGE:
+		*data = g_variant_new_string(demo_signal_edges[devc->clock_edge]);
+		break;
+	case SR_CONF_CLOCK_TYPE:
+		*data = g_variant_new_boolean(devc->clock_type);
+		break;
+	case SR_CONF_TRIGGER_OUT:
+		*data = g_variant_new_boolean(devc->trig_out_en);
+		break;
+	case SR_CONF_RLE:
+		*data = g_variant_new_boolean(devc->rle);
+		break;
+	case SR_CONF_EX_TRIGGER_MATCH:
+		*data = g_variant_new_string(demo_extern_trig_strs[devc->ext_trig_mode]);
+		break;
+	case SR_CONF_THRESHOLD:
+		*data = g_variant_new_string(demo_threshold_strs[devc->threshold_sel]);
+		break;
+	case SR_CONF_BUFFER_OPTIONS:
+		*data = g_variant_new_string(demo_buffer_options_strs[devc->buffer_options]);
+		break;
+	case SR_CONF_BANDWIDTH_LIMIT:
+		*data = g_variant_new_string(demo_bw_limit_strs[devc->bw_limit]);
+		break;
+	case SR_CONF_PWM0_EN:
+		*data = g_variant_new_boolean(devc->pwm0_en);
+		break;
+	case SR_CONF_PWM0_FREQ:
+		*data = g_variant_new_double(devc->pwm0_freq);
+		break;
+	case SR_CONF_PWM0_DUTY:
+		*data = g_variant_new_double(devc->pwm0_duty);
+		break;
+	case SR_CONF_PWM1_EN:
+		*data = g_variant_new_boolean(devc->pwm1_en);
+		break;
+	case SR_CONF_PWM1_FREQ:
+		*data = g_variant_new_double(devc->pwm1_freq);
+		break;
+	case SR_CONF_PWM1_DUTY:
+		*data = g_variant_new_double(devc->pwm1_duty);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -1058,26 +1107,7 @@ static int config_get(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
-/* --- PXLogic-compatible config_get cases (device-level, cg=NULL) ---
- * Returns the current value for each test key. These are only reached when
- * cg is NULL (device-level query from the DeviceOptionsDock Mode section). */
-#define DEMO_GET_PXLOGIC_KEYS() \
-	case SR_CONF_VTH: *data = g_variant_new_double(devc->vth); break; \
-	case SR_CONF_FILTER: *data = g_variant_new_string(demo_filter_modes[devc->filter]); break; \
-	case SR_CONF_CLOCK_EDGE: *data = g_variant_new_string(demo_signal_edges[devc->clock_edge]); break; \
-	case SR_CONF_CLOCK_TYPE: *data = g_variant_new_boolean(devc->clock_type); break; \
-	case SR_CONF_TRIGGER_OUT: *data = g_variant_new_boolean(devc->trig_out_en); break; \
-	case SR_CONF_RLE: *data = g_variant_new_boolean(devc->rle); break; \
-	case SR_CONF_EX_TRIGGER_MATCH: *data = g_variant_new_string(demo_extern_trig_strs[devc->ext_trig_mode]); break; \
-	case SR_CONF_THRESHOLD: *data = g_variant_new_string(demo_threshold_strs[devc->threshold_sel]); break; \
-	case SR_CONF_BUFFER_OPTIONS: *data = g_variant_new_string(demo_buffer_options_strs[devc->buffer_options]); break; \
-	case SR_CONF_BANDWIDTH_LIMIT: *data = g_variant_new_string(demo_bw_limit_strs[devc->bw_limit]); break; \
-	case SR_CONF_PWM0_EN: *data = g_variant_new_boolean(devc->pwm0_en); break; \
-	case SR_CONF_PWM0_FREQ: *data = g_variant_new_double(devc->pwm0_freq); break; \
-	case SR_CONF_PWM0_DUTY: *data = g_variant_new_double(devc->pwm0_duty); break; \
-	case SR_CONF_PWM1_EN: *data = g_variant_new_boolean(devc->pwm1_en); break; \
-	case SR_CONF_PWM1_FREQ: *data = g_variant_new_double(devc->pwm1_freq); break; \
-	case SR_CONF_PWM1_DUTY: *data = g_variant_new_double(devc->pwm1_duty); break;
+/* Type-check helper for config_set entry points. Verifies the GVariant type
  * matches the expected type string (e.g. "i" for int32, "t" for uint64).
  * sr_variant_type_check in hwdriver.c already validates types before the
  * driver's config_set runs, but this provides a driver-level diagnostic
@@ -1556,6 +1586,79 @@ case SR_CONF_PROBE_EN:
 		}
 		break;
 	}
+	/* --- PXLogic-compatible test keys (device-level) --- */
+	case SR_CONF_VTH:
+		devc->vth = g_variant_get_double(data);
+		break;
+	case SR_CONF_FILTER: {
+		int fidx = std_str_idx(data, ARRAY_AND_SIZE(demo_filter_modes));
+		if (fidx < 0)
+			return SR_ERR_ARG;
+		devc->filter = fidx;
+		break;
+	}
+	case SR_CONF_CLOCK_EDGE: {
+		int eidx = std_str_idx(data, ARRAY_AND_SIZE(demo_signal_edges));
+		if (eidx < 0)
+			return SR_ERR_ARG;
+		devc->clock_edge = eidx;
+		break;
+	}
+	case SR_CONF_CLOCK_TYPE:
+		devc->clock_type = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_TRIGGER_OUT:
+		devc->trig_out_en = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_RLE:
+		devc->rle = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_EX_TRIGGER_MATCH: {
+		int tidx = std_str_idx(data, ARRAY_AND_SIZE(demo_extern_trig_strs));
+		if (tidx < 0)
+			return SR_ERR_ARG;
+		devc->ext_trig_mode = tidx;
+		break;
+	}
+	case SR_CONF_THRESHOLD: {
+		int thidx = std_str_idx(data, ARRAY_AND_SIZE(demo_threshold_strs));
+		if (thidx < 0)
+			return SR_ERR_ARG;
+		devc->threshold_sel = thidx;
+		break;
+	}
+	case SR_CONF_BUFFER_OPTIONS: {
+		int bidx = std_str_idx(data, ARRAY_AND_SIZE(demo_buffer_options_strs));
+		if (bidx < 0)
+			return SR_ERR_ARG;
+		devc->buffer_options = bidx;
+		break;
+	}
+	case SR_CONF_BANDWIDTH_LIMIT: {
+		int bwidx = std_str_idx(data, ARRAY_AND_SIZE(demo_bw_limit_strs));
+		if (bwidx < 0)
+			return SR_ERR_ARG;
+		devc->bw_limit = bwidx;
+		break;
+	}
+	case SR_CONF_PWM0_EN:
+		devc->pwm0_en = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_PWM0_FREQ:
+		devc->pwm0_freq = g_variant_get_double(data);
+		break;
+	case SR_CONF_PWM0_DUTY:
+		devc->pwm0_duty = g_variant_get_double(data);
+		break;
+	case SR_CONF_PWM1_EN:
+		devc->pwm1_en = g_variant_get_boolean(data);
+		break;
+	case SR_CONF_PWM1_FREQ:
+		devc->pwm1_freq = g_variant_get_double(data);
+		break;
+	case SR_CONF_PWM1_DUTY:
+		devc->pwm1_duty = g_variant_get_double(data);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -1659,6 +1762,25 @@ static int config_list(uint32_t key, GVariant **data,
 			else
 				*data = g_variant_new_strv(
 					ARRAY_AND_SIZE(logic_pattern_str));
+			break;
+		/* --- PXLogic-compatible list keys --- */
+		case SR_CONF_FILTER:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_filter_modes));
+			break;
+		case SR_CONF_CLOCK_EDGE:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_signal_edges));
+			break;
+		case SR_CONF_EX_TRIGGER_MATCH:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_extern_trig_strs));
+			break;
+		case SR_CONF_THRESHOLD:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_threshold_strs));
+			break;
+		case SR_CONF_BUFFER_OPTIONS:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_buffer_options_strs));
+			break;
+		case SR_CONF_BANDWIDTH_LIMIT:
+			*data = g_variant_new_strv(ARRAY_AND_SIZE(demo_bw_limit_strs));
 			break;
 		default:
 			return SR_ERR_NA;
