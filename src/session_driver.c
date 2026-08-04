@@ -137,6 +137,14 @@ static gboolean stream_pxv_logic_data(struct sr_dev_inst *sdi)
 		if (ch_struct->type == SR_CHANNEL_LOGIC && ch_struct->enabled)
 			ch_count++;
 	}
+	/* FIX: the v3 per-channel chunked format reconstructs a sample-interleaved
+	 * SPLIT stream whose unitsize must equal the number of logic channels'
+	 * byte width, NOT the hardware driver's unitsize recorded in the file
+	 * (which can be larger, e.g. 2 for 8 channels). Using the wrong unitsize
+	 * shifts every byte and corrupts the save→load→save round-trip. */
+	int calc_unitsize = (ch_count + 7) / 8;
+	if (calc_unitsize > 0)
+		unitsize = calc_unitsize;
 	if (ch_count <= 0)
 		return FALSE;
 
