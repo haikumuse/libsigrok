@@ -302,44 +302,50 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 			devc->logic_data[i] = (uint8_t)(rand() & 0xff);
 		break;
 	case PATTERN_INC:
-		for (i = 0; i < size; i++) {
-			for (j = 0; j < devc->logic_unitsize; j++)
-				devc->logic_data[i + j] = devc->step;
+		for (i = 0; i < size; i += devc->logic_unitsize) {
+			set_logic_data(devc->step, &devc->logic_data[i],
+					devc->logic_unitsize);
 			devc->step++;
 		}
 		break;
 	case PATTERN_WALKING_ONE:
 		/* j contains the value of the highest bit */
-		j = 1 << (devc->num_logic_channels - 1);
-		for (i = 0; i < size; i++) {
-			devc->logic_data[i] = devc->step;
+		j = (uint64_t)1 << (devc->num_logic_channels - 1);
+		for (i = 0; i < size; i += devc->logic_unitsize) {
+			set_logic_data(devc->step, &devc->logic_data[i],
+					devc->logic_unitsize);
 			if (devc->step == 0)
 				devc->step = 1;
+			else if (devc->step == j)
+				devc->step = 0;
 			else
-				if (devc->step == j)
-					devc->step = 0;
-				else
-					devc->step <<= 1;
+				devc->step <<= 1;
 		}
 		break;
 	case PATTERN_WALKING_ZERO:
 		/* Same as walking one, only with inverted output */
 		/* j contains the value of the highest bit */
-		j = 1 << (devc->num_logic_channels - 1);
-		for (i = 0; i < size; i++) {
-			devc->logic_data[i] = ~devc->step;
+		j = (uint64_t)1 << (devc->num_logic_channels - 1);
+		for (i = 0; i < size; i += devc->logic_unitsize) {
+			set_logic_data(~devc->step, &devc->logic_data[i],
+					devc->logic_unitsize);
 			if (devc->step == 0)
 				devc->step = 1;
+			else if (devc->step == j)
+				devc->step = 0;
 			else
-				if (devc->step == j)
-					devc->step = 0;
-				else
-					devc->step <<= 1;
+				devc->step <<= 1;
 		}
 		break;
 	case PATTERN_ALL_LOW:
+		/* Re-fill each chunk. The memset in config_set only runs once
+		 * when the pattern is selected, but the buffer is reused across
+		 * calls and modified in-place by logic_fixup_feed and the PWM
+		 * override. Without re-filling, stale modifications persist. */
+		memset(devc->logic_data, 0x00, size);
+		break;
 	case PATTERN_ALL_HIGH:
-		/* These were set when the pattern mode was selected. */
+		memset(devc->logic_data, 0xff, size);
 		break;
 	case PATTERN_SQUID:
 		memset(devc->logic_data, 0x00, size);
@@ -372,27 +378,49 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 
 	/* PWM override: when enabled, PWM0 replaces channel 6's bit and
 	 * PWM1 replaces channel 7's bit with a square wave generated from
-	 * the user-configured frequency and duty cycle. */
+	 * the user-configured frequency and duty cycle.
+	 *
+	 * Uses DDS (Direct Digital Synthesis) phase accumulator for precise
+	 * frequency and duty cycle. The 32-bit phase provides sub-sample
+	 * resolution, avoiding truncation errors that occur when samplerate
+	 * is not an exact multiple of the PWM frequency (which caused
+	 * non-uniform waveforms with the old integer-division approach). */
 	if (devc->pwm0_en || devc->pwm1_en) {
+		uint32_t pwm0_step = 0, pwm0_thresh = 0;
+		uint32_t pwm1_step = 0, pwm1_thresh = 0;
+
+		if (devc->pwm0_en && devc->pwm0_freq > 0 && devc->cur_samplerate > 0) {
+			double step_d = (double)devc->pwm0_freq * 4294967296.0
+					/ (double)devc->cur_samplerate;
+			if (step_d < 4294967296.0)
+				pwm0_step = (uint32_t)step_d;
+			pwm0_thresh = (devc->pwm0_duty >= 100.0) ? 0xFFFFFFFF :
+				      (devc->pwm0_duty <= 0.0) ? 0 :
+				      (uint32_t)(devc->pwm0_duty * 4294967296.0 / 100.0);
+		}
+		if (devc->pwm1_en && devc->pwm1_freq > 0 && devc->cur_samplerate > 0) {
+			double step_d = (double)devc->pwm1_freq * 4294967296.0
+					/ (double)devc->cur_samplerate;
+			if (step_d < 4294967296.0)
+				pwm1_step = (uint32_t)step_d;
+			pwm1_thresh = (devc->pwm1_duty >= 100.0) ? 0xFFFFFFFF :
+				      (devc->pwm1_duty <= 0.0) ? 0 :
+				      (uint32_t)(devc->pwm1_duty * 4294967296.0 / 100.0);
+		}
+
 		uint64_t sample_index;
 		for (i = 0; i < size; i += devc->logic_unitsize) {
 			/* Absolute sample index = sent_samples + (this sample offset). */
 			sample_index = devc->sent_samples + (i / devc->logic_unitsize);
-			if (devc->pwm0_en && devc->pwm0_freq > 0) {
-				/* Period in samples = samplerate / frequency. */
-				uint64_t period = (uint64_t)(devc->cur_samplerate / devc->pwm0_freq);
-				if (period == 0) period = 1;
-				uint64_t high_samples = (uint64_t)(period * devc->pwm0_duty / 100.0);
-				if (high_samples == 0) high_samples = 1;
-				uint8_t bit_val = ((sample_index % period) < high_samples) ? 0x40 : 0x00;
+			if (pwm0_step > 0) {
+				/* DDS phase: (sample_index * step) mod 2^32 */
+				uint32_t phase = (uint32_t)(sample_index * (uint64_t)pwm0_step);
+				uint8_t bit_val = (phase < pwm0_thresh) ? 0x40 : 0x00;
 				devc->logic_data[i] = (devc->logic_data[i] & ~0x40) | bit_val;
 			}
-			if (devc->pwm1_en && devc->pwm1_freq > 0) {
-				uint64_t period = (uint64_t)(devc->cur_samplerate / devc->pwm1_freq);
-				if (period == 0) period = 1;
-				uint64_t high_samples = (uint64_t)(period * devc->pwm1_duty / 100.0);
-				if (high_samples == 0) high_samples = 1;
-				uint8_t bit_val = ((sample_index % period) < high_samples) ? 0x80 : 0x00;
+			if (pwm1_step > 0) {
+				uint32_t phase = (uint32_t)(sample_index * (uint64_t)pwm1_step);
+				uint8_t bit_val = (phase < pwm1_thresh) ? 0x80 : 0x00;
 				devc->logic_data[i] = (devc->logic_data[i] & ~0x80) | bit_val;
 			}
 		}
