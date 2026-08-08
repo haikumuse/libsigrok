@@ -33,11 +33,16 @@
 #define LOG_PREFIX "demo"
 
 /* The size in bytes of chunks to send through the session bus.
- * 64 KB: larger batches reduce per-tick packet count (and thus Qt event
- * flooding from DataFeedParser) at high sample rates. With 500K samples
- * per tick and 16 channels (unitsize=2), this gives 16 packets/tick
- * instead of 244 with the old 4 KB buffer. */
-#define LOGIC_BUFSIZE			65536
+ *
+ * 1 MB: matches pxlogic's approach of sending large packets (up to 4MB
+ * per USB transfer). Each sr_session_send call has significant overhead
+ * (vector heap-alloc + copy, mutex lock/unlock, condition variable
+ * notify, 2 Qt async events). With 64KB, a 2M-sample tick at 32 channels
+ * produced 122 calls — now it produces only 8.
+ *
+ * The dev_context struct embeds two arrays of this size (logic_data +
+ * cross_data_buf = 2 MB total). This is fine for a heap-allocated struct. */
+#define LOGIC_BUFSIZE			(1024 * 1024)
 /* Size of the analog pattern space per channel. */
 #define ANALOG_BUFSIZE			4096
 /* This is a development feature: it starts a new frame every n samples. */

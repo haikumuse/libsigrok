@@ -1553,11 +1553,12 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	 * responsive, and the UI stays interactive. This is the expected
 	 * trade-off for a software simulator — real hardware uses DMA.
 	 *
-	 * 2 M samples/tick: with the xorshift32 fast PRNG + direct
-	 * LA_CROSS_DATA generation, each tick costs ~8 ms (fill + send),
-	 * well within the 25 ms budget. At 1 GHz this yields 80 M samples/s
-	 * = 80 ms of data per wall-clock second — 8x the old 500K cap. */
-#define DEMO_MAX_SAMPLES_PER_TICK 2000000
+	 * 8 M samples/tick: with 1 MB packets (LOGIC_BUFSIZE), a 32-channel
+	 * tick produces ~31 sr_session_send calls (down from 122 with 64KB
+	 * packets). Each call sends 1 MB — matching pxlogic's large-packet
+	 * strategy. At 1 GHz this yields ~320 M samples/s = 320 ms of data
+	 * per wall-clock second. */
+#define DEMO_MAX_SAMPLES_PER_TICK 8000000
 	if (samples_todo > DEMO_MAX_SAMPLES_PER_TICK)
 		samples_todo = DEMO_MAX_SAMPLES_PER_TICK;
 
