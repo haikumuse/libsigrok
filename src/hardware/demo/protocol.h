@@ -32,8 +32,12 @@
 
 #define LOG_PREFIX "demo"
 
-/* The size in bytes of chunks to send through the session bus. */
-#define LOGIC_BUFSIZE			4096
+/* The size in bytes of chunks to send through the session bus.
+ * 64 KB: larger batches reduce per-tick packet count (and thus Qt event
+ * flooding from DataFeedParser) at high sample rates. With 500K samples
+ * per tick and 16 channels (unitsize=2), this gives 16 packets/tick
+ * instead of 244 with the old 4 KB buffer. */
+#define LOGIC_BUFSIZE			65536
 /* Size of the analog pattern space per channel. */
 #define ANALOG_BUFSIZE			4096
 /* This is a development feature: it starts a new frame every n samples. */
@@ -282,6 +286,13 @@ struct dev_context {
 	/* There is only ever one logic channel group, so its pattern goes here. */
 	enum logic_pattern_type logic_pattern;
 	uint8_t logic_data[LOGIC_BUFSIZE];
+	/* LA_CROSS_DATA conversion buffer. After logic_generator produces
+	 * sample-interleaved data in logic_data, convert_to_cross_data()
+	 * rearranges it into channel-block format (64 samples per channel
+	 * per block) matching pxlogic's hardware DMA layout. This exercises
+	 * the frontend's append_cross_payload + bit-align code path, which
+	 * would otherwise never be tested with the demo driver. */
+	uint8_t cross_data_buf[LOGIC_BUFSIZE];
 	/* Analog */
 	struct analog_pattern *analog_patterns[ARRAY_SIZE(analog_pattern_str)];
 	int32_t num_analog_channels;
@@ -433,6 +444,14 @@ struct dev_context {
 	gboolean pwm1_en;
 	double pwm1_freq;
 	double pwm1_duty;
+
+	/* Simulated hardware memory depth (total samples across all channels).
+	 * Mirrors pxlogic's hw_depth (SR_Gn(4) = 4 billion samples). Used by
+	 * SR_CONF_HW_DEPTH to return hw_depth / ch_num, bounding the sample
+	 * depth dropdown the same way real hardware does. In Stream mode the
+	 * app-layer SR_CONF_STREAM_MEM_BUFF / SR_CONF_STREAM_BUFF (16GB default)
+	 * is used instead — matching pxlogic's stream mode behavior. */
+	uint64_t simulated_hw_depth;
 };
 
 struct analog_gen {

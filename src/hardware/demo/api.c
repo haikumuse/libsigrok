@@ -536,6 +536,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	devc->pwm1_freq = 1000.0;
 	devc->pwm1_duty = 50.0;
 
+	/* Simulated hardware memory depth: 4 billion total samples (matches
+	 * pxlogic's hw_depth = SR_Gn(4)). HW_DEPTH returns this / ch_num,
+	 * bounding the sample depth dropdown like real hardware. */
+	devc->simulated_hw_depth = (uint64_t)4000000000ULL;
+
 	if (num_logic_channels > 0) {
 		/* Logic channels, all in one channel group. */
 		cg = sr_channel_group_new(sdi, "Logic", NULL);
@@ -891,17 +896,28 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_byte(dso_max_height_values[0]);
 		break;
 	case SR_CONF_HW_DEPTH:
-		/* HW_DEPTH depends on what the frontend is asking about:
-		 * - DSO channels: DSO_PACKET_LEN (20k samples per frame)
-		 * - Logic/Analog: limit_samples (set by frontend via SR_CONF_LIMIT_SAMPLES)
-		 * The frontend queries HW_DEPTH to size snapshot buffers; returning
-		 * DSO_PACKET_LEN for all modes would undersize logic/analog buffers. */
+		/* Simulated hardware storage depth (samples per channel).
+		 * - DSO: DSO_PACKET_LEN (20k samples per frame)
+		 * - Logic: simulated_hw_depth / ch_num, matching pxlogic's
+		 *   hw_depth / ch_num formula. This bounds the sample depth
+		 *   dropdown by the simulated hardware memory (4G samples),
+		 *   not by the current limit_samples (which was a circular
+		 *   dependency — the dropdown upper bound changed with the
+		 *   current selection). In Stream mode the frontend uses
+		 *   SR_CONF_STREAM_MEM_BUFF instead, so this value is only
+		 *   used in Buffer mode (same as pxlogic). */
 		if (devc->num_dso_channels > 0 && devc->num_logic_channels == 0
 				&& devc->num_analog_channels == 0)
 			*data = g_variant_new_uint64(DSO_PACKET_LEN);
-		else
-			*data = g_variant_new_uint64(devc->limit_samples > 0
-					? devc->limit_samples : SR_MHZ(1));
+		else {
+			size_t ch_num = devc->enabled_logic_channels;
+			if (ch_num == 0)
+				ch_num = devc->num_logic_channels;
+			if (ch_num == 0)
+				ch_num = 1;
+			*data = g_variant_new_uint64(
+				devc->simulated_hw_depth / ch_num);
+		}
 		break;
 	case SR_CONF_VLD_CH_NUM:
 		*data = g_variant_new_int32(devc->num_dso_channels);
@@ -1158,6 +1174,11 @@ static int config_set(uint32_t key, GVariant *data,
 	case SR_CONF_LIMIT_SAMPLES:
 		devc->limit_msec = 0;
 		devc->limit_samples = g_variant_get_uint64(data);
+		/* Align to 64 bytes to match pxlogic's hardware sample alignment.
+		 * pxlogic does: (limit_samples + 63) & ~63. Without this, tests
+		 * that set non-aligned sample counts get different actual counts
+		 * between demo and pxlogic (e.g. 1000 → pxlogic=1024, demo=1000). */
+		devc->limit_samples = (devc->limit_samples + 63) & ~63;
 		break;
 	case SR_CONF_LIMIT_MSEC:
 		devc->limit_msec = g_variant_get_uint64(data);

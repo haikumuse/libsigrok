@@ -997,6 +997,13 @@ static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *s
         *data = g_variant_new_uint64(devc->capture_ratio);
         break;
 
+    case SR_CONF_LOOP_MODE:
+        /* Loop capture toggle. When TRUE, receive_transfer skips the
+         * samples_counter >= limit_samples check so data flows forever
+         * until user stops. Mirrors demo driver's loop_mode. */
+        *data = g_variant_new_boolean(devc->is_loop);
+        break;
+
     case SR_CONF_VTH:
         *data = g_variant_new_double(devc->vth);
         break;
@@ -1398,6 +1405,14 @@ static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sd
         const char *cfg_str = g_variant_get_string(data, NULL);
         devc->trig_adv_config = g_strdup(cfg_str ? cfg_str : "");
         sr_dbg("%s: setting trig_adv_config (len=%zu)", __func__, strlen(devc->trig_adv_config));
+        ret = SR_OK;
+    } else if (key == SR_CONF_LOOP_MODE) {
+        /* Loop capture toggle. capturemanager.cpp sets this before acquisition.
+         * When TRUE, receive_transfer skips the samples_counter check so USB
+         * transfers keep resubmitting — data flows forever until user stops.
+         * Mirrors demo driver's loop_mode behavior. */
+        devc->is_loop = g_variant_get_boolean(data) ? 1 : 0;
+        sr_info("pxlogic: set LOOP_MODE=%d", devc->is_loop);
         ret = SR_OK;
     } else {
         ret = SR_ERR_NA;

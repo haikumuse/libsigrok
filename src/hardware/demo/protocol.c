@@ -456,6 +456,54 @@ static void logic_fixup_feed(struct dev_context *devc,
 }
 
 /*
+ * Convert sample-interleaved logic data to LA_CROSS_DATA (channel-block)
+ * format, matching pxlogic's hardware DMA layout.
+ *
+ * Input (sample-interleaved): each sample is unitsize bytes, where bit k
+ *   of byte b represents channel (b*8 + k).
+ * Output (LA_CROSS_DATA): groups of 64 samples per channel, 8 bytes per
+ *   channel (64 samples packed 8 per byte), channels in sequence:
+ *   [ch0_8bytes][ch1_8bytes]...[chN-1_8bytes] per group.
+ *
+ * num_samples must be a multiple of 64. Output size = num_samples * unitsize
+ * (same as input — just rearranged).
+ */
+static void convert_to_cross_data(const uint8_t *src, uint8_t *dst,
+	uint64_t num_samples, size_t unitsize)
+{
+	uint64_t num_channels = (uint64_t)unitsize * 8;
+	uint64_t num_groups = num_samples / 64;
+
+	memset(dst, 0, num_groups * num_channels * 8);
+
+	/* Optimized: precompute group base pointers and use bit operations
+	 * instead of division/modulo. Iterate by byte position and bit within
+	 * byte (avoids ch/8 and ch%8 per channel). Process 8 samples at a
+	 * time to build each output byte, reducing loop overhead. */
+	for (uint64_t g = 0; g < num_groups; g++) {
+		const uint8_t *src_g = src + (g * 64) * unitsize;
+		uint8_t *dst_g = dst + g * num_channels * 8;
+		for (size_t bp = 0; bp < unitsize; bp++) {
+			for (uint32_t bit = 0; bit < 8; bit++) {
+				uint8_t mask = (uint8_t)(1u << bit);
+				uint64_t ch = (uint64_t)bp * 8 + bit;
+				uint8_t *out = dst_g + ch * 8;
+				/* 8 groups of 8 samples → 8 output bytes */
+				for (uint64_t s8 = 0; s8 < 8; s8++) {
+					uint8_t ob = 0;
+					const uint8_t *p = src_g + (s8 * 8) * unitsize + bp;
+					for (uint64_t b = 0; b < 8; b++) {
+						if (p[b * unitsize] & mask)
+							ob |= (uint8_t)(1u << b);
+					}
+					out[s8] = ob;
+				}
+			}
+		}
+	}
+}
+
+/*
  * 对生成的模拟样本施加耦合效果 (模拟真实示波器模拟前端的 AC/DC/GND 耦合)。
  *
  * DSL 等真实硬件驱动通过 I2C 配置耦合继电器, 由硬件物理实现; demo 没有
@@ -1187,7 +1235,30 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	samples_todo = (todo_us * devc->cur_samplerate + G_USEC_PER_SEC - 1)
 			/ G_USEC_PER_SEC;
 
-	if (devc->limit_samples > 0) {
+	/* Cap samples per tick to keep the callback lightweight.
+	 *
+	 * At high sample rates (e.g. 1 GHz), a 25 ms tick produces
+	 * samples_todo = 25 M — far too many to generate + convert + send
+	 * in one tick. The while-loop below would iterate ~12 000 times,
+	 * each calling logic_generator + convert_to_cross_data +
+	 * sr_session_send, totalling ~400 M iterations for the conversion
+	 * alone. This blocks the session worker thread for seconds,
+	 * preventing stop-request processing and causing backpressure
+	 * stalls that freeze the UI.
+	 *
+	 * Capping to a fixed maximum keeps each tick under ~5 ms. The
+	 * driver falls behind real-time at high rates (the capture takes
+	 * longer in wall-clock time), but data flows smoothly, stop is
+	 * responsive, and the UI stays interactive. This is the expected
+	 * trade-off for a software simulator — real hardware uses DMA. */
+#define DEMO_MAX_SAMPLES_PER_TICK 500000
+	if (samples_todo > DEMO_MAX_SAMPLES_PER_TICK)
+		samples_todo = DEMO_MAX_SAMPLES_PER_TICK;
+
+	/* In loop mode, skip limit_samples clipping — data flows continuously
+	 * without stopping at limit_samples, matching pxlogic's is_loop=1
+	 * behavior where the samples_counter check is skipped entirely. */
+	if (!devc->loop_mode && devc->limit_samples > 0) {
 		if (devc->limit_samples < devc->sent_samples)
 			samples_todo = 0;
 		else if (devc->limit_samples - devc->sent_samples < samples_todo)
@@ -1265,44 +1336,67 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 				}
 			}
 
-			/* Send logic samples */
+			/* Send logic samples as LA_CROSS_DATA (channel-block format),
+			 * matching pxlogic's hardware DMA layout. This exercises the
+			 * frontend's append_cross_payload + bit-align code path, which
+			 * would otherwise never be tested with the demo driver. */
 			packet.type = SR_DF_LOGIC;
 			packet.payload = &logic;
 			logic.unitsize = devc->logic_unitsize;
 
-			if (!devc->stl) {
-				/* No trigger defined: always send full buffer (both modes). */
-				logic.length = sending_now * devc->logic_unitsize;
-				logic.data = devc->logic_data;
-				logic_fixup_feed(devc, &logic);
-				sr_session_send(sdi, &packet);
-				logic_done += sending_now;
-			} else if (devc->op_mode == DEMO_OP_STREAM) {
-				/* Stream mode: send the full buffer regardless of trigger
-				 * state. The trigger marker was already emitted by
-				 * soft_trigger_logic_check (SR_DF_TRIGGER). The frontend
-				 * ring buffer will display pre/post-trigger data together. */
-				logic.length = sending_now * devc->logic_unitsize;
-				logic.data = devc->logic_data;
-				logic_fixup_feed(devc, &logic);
-				sr_session_send(sdi, &packet);
-				logic_done += sending_now;
-			} else {
-				/* Buffer mode: only send AFTER trigger fires. Pre-trigger
-				 * samples are buffered inside soft_trigger_logic and sent
-				 * by soft_trigger_logic_check itself when the trigger fires. */
+			/* Determine data range based on trigger state */
+			uint8_t *logic_src = devc->logic_data;
+			uint64_t logic_send_samples = sending_now;
+
+			if (devc->stl && devc->op_mode == DEMO_OP_BUFFER) {
+				/* Buffer mode: only send AFTER trigger fires. */
 				if (devc->trigger_fired && (trigger_offset < (int)sending_now)) {
-					logic.length = (sending_now - trigger_offset) * devc->logic_unitsize;
-					logic.data = devc->logic_data + trigger_offset * devc->logic_unitsize;
-					logic_fixup_feed(devc, &logic);
-					sr_session_send(sdi, &packet);
-					logic_done += sending_now - trigger_offset;
-				} else if (!devc->trigger_fired) {
-					/* Trigger not yet fired: send nothing. logic_done still
-					 * advances so we don't loop forever, but sent_samples
-					 * is NOT accumulated (see below). */
+					logic_src = devc->logic_data + trigger_offset * devc->logic_unitsize;
+					logic_send_samples = sending_now - trigger_offset;
+				} else {
+					logic_send_samples = 0;
+					/* Trigger not yet fired: send nothing but advance
+					 * logic_done so we don't loop forever. */
 					logic_done += sending_now;
 				}
+			}
+
+			if (logic_send_samples > 0) {
+				/* Apply fixup on sample-interleaved data (masks disabled
+				 * channel bits in-place). */
+				logic.length = logic_send_samples * devc->logic_unitsize;
+				logic.data = logic_src;
+				logic_fixup_feed(devc, &logic);
+
+				/* Convert to LA_CROSS_DATA channel-block format.
+				 * Round down to a multiple of 64 (one chunk = 64 samples
+				 * per channel). Any remainder is deferred to next tick. */
+				uint64_t cross_samples = (logic_send_samples / 64) * 64;
+				if (cross_samples > 0) {
+					convert_to_cross_data(logic_src, devc->cross_data_buf,
+						cross_samples, devc->logic_unitsize);
+					uint64_t cross_len = cross_samples * devc->logic_unitsize;
+
+					/* Simulate real hardware: the last packet before stop
+					 * often ends with a partial chunk (not a multiple of
+					 * channel_num * 8 bytes), because USB transfers are
+					 * sized by the DMA engine. This leaves _ch_fraction
+					 * or _byte_fraction non-zero, triggering the bit-align
+					 * phase in append_cross_payload on the next packet. */
+					if (!devc->loop_mode && devc->limit_samples > 0 &&
+						devc->sent_samples + logic_done + cross_samples
+							>= devc->limit_samples) {
+						uint64_t chunk_sz = (uint64_t)devc->logic_unitsize * 64;
+						if (cross_len > chunk_sz + 3)
+							cross_len -= 3;
+					}
+
+					logic.length = cross_len;
+					logic.data = devc->cross_data_buf;
+					logic.format = LA_CROSS_DATA;
+					sr_session_send(sdi, &packet);
+				}
+				logic_done += logic_send_samples;
 			}
 		}
 
@@ -1344,51 +1438,33 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 		}
 	}
 
-	if ((devc->limit_samples > 0 && devc->sent_samples >= devc->limit_samples)
+	/* Stop condition: limit_samples only applies when NOT in loop mode
+	 * (matching pxlogic's is_loop=1 which skips the samples_counter check
+	 * entirely — data flows forever until user stops). limit_msec always
+	 * applies as a hard timeout, even in loop mode. */
+	if ((!devc->loop_mode && devc->limit_samples > 0 && devc->sent_samples >= devc->limit_samples)
 			|| (limit_us > 0 && devc->spent_us >= limit_us)) {
 
-		if (devc->loop_mode) {
-			/* Loop mode: wrap counters and keep streaming instead of
-			 * stopping. The session timer stays alive so data flows
-			 * continuously until the user presses stop.
-			 *
-			 * CRITICAL FIX: Sync spent_us to elapsed_us (NOT reset to 0).
-			 * elapsed_us = g_get_monotonic_time() - start_us keeps growing
-			 * across wraps because start_us is set once at acquisition start.
-			 * If spent_us is reset to 0, the next tick computes
-			 *   todo_us = elapsed_us - 0 = total elapsed time since start,
-			 * causing the driver to dump ALL accumulated time as a single
-			 * massive batch (e.g. 24s * 1MHz = 24M samples in one call).
-			 * This floods the data feed and freezes the UI.
-			 * Setting spent_us = elapsed_us makes todo_us = 0 on the next
-			 * tick, then normal ~25ms increments resume on subsequent ticks. */
-			sr_dbg("demo_prepare_data: LOOP wrap (sent_samples=%" PRIu64
-				" -> 0, spent_us=%" PRId64 " -> %" PRId64 ")",
-				devc->sent_samples, devc->spent_us, elapsed_us);
-			devc->sent_samples = 0;
-			devc->spent_us = elapsed_us;
-		} else {
-			/* If we're averaging everything - now is the time to send data */
-			if (devc->avg && devc->avg_samples == 0) {
-				g_hash_table_iter_init(&iter, devc->ch_ag);
-				while (g_hash_table_iter_next(&iter, NULL, &value)) {
-					ag = value;
-					packet.type = SR_DF_ANALOG;
-					packet.payload = &ag->packet;
-					/* 应用耦合 (与 do_send 路径一致)。 */
-					apply_analog_coupling(ag, devc, &ag->avg_val, 1);
-					ag->packet.data = &ag->avg_val;
-					ag->packet.num_samples = 1;
-					sr_session_send(sdi, &packet);
-				}
+		/* If we're averaging everything - now is the time to send data */
+		if (devc->avg && devc->avg_samples == 0) {
+			g_hash_table_iter_init(&iter, devc->ch_ag);
+			while (g_hash_table_iter_next(&iter, NULL, &value)) {
+				ag = value;
+				packet.type = SR_DF_ANALOG;
+				packet.payload = &ag->packet;
+				/* 应用耦合 (与 do_send 路径一致)。 */
+				apply_analog_coupling(ag, devc, &ag->avg_val, 1);
+				ag->packet.data = &ag->avg_val;
+				ag->packet.num_samples = 1;
+				sr_session_send(sdi, &packet);
 			}
-			sr_info("demo_prepare_data: STOP condition met (sent_samples=%" PRIu64
-				", limit_samples=%" PRIu64 ", spent_us=%" PRId64
-				", limit_us=%" PRId64 ")",
-				devc->sent_samples, devc->limit_samples,
-				devc->spent_us, limit_us);
-			sr_dev_acquisition_stop(sdi);
 		}
+		sr_info("demo_prepare_data: STOP condition met (sent_samples=%" PRIu64
+			", limit_samples=%" PRIu64 ", spent_us=%" PRId64
+			", limit_us=%" PRId64 ", loop_mode=%d)",
+			devc->sent_samples, devc->limit_samples,
+			devc->spent_us, limit_us, (int)devc->loop_mode);
+		sr_dev_acquisition_stop(sdi);
 	} else if (devc->limit_frames) {
 		if (devc->sent_frame_samples == 0)
 			std_session_send_df_frame_begin(sdi);
