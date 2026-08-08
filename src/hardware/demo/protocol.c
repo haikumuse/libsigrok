@@ -266,6 +266,42 @@ static uint64_t encode_number_to_gray(uint64_t nr)
 	return nr ^ (nr >> 1);
 }
 
+/* Fast xorshift32 PRNG — ~50x faster than rand() on Windows.
+ * Generates a full 32-bit random word per call; we extract bytes from it
+ * to fill buffers 4 bytes at a time, amortizing the call cost. */
+static inline uint32_t demo_xorshift32(uint32_t *state)
+{
+	uint32_t x = *state;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	*state = x;
+	return x;
+}
+
+/* Fill a buffer with fast random bytes using xorshift32.
+ * Generates 4 random bytes per PRNG iteration and stores them at once,
+ * with a scalar tail for the remaining 1-3 bytes. */
+static void demo_fill_random(uint32_t *prng_state, uint8_t *buf, size_t len)
+{
+	size_t i = 0;
+	while (i + 4 <= len) {
+		uint32_t r = demo_xorshift32(prng_state);
+		buf[i]     = (uint8_t)(r);
+		buf[i + 1] = (uint8_t)(r >> 8);
+		buf[i + 2] = (uint8_t)(r >> 16);
+		buf[i + 3] = (uint8_t)(r >> 24);
+		i += 4;
+	}
+	if (i < len) {
+		uint32_t r = demo_xorshift32(prng_state);
+		while (i < len) {
+			buf[i++] = (uint8_t)(r);
+			r >>= 8;
+		}
+	}
+}
+
 static void set_logic_data(uint64_t bits, uint8_t *data, size_t len)
 {
 	while (len--) {
@@ -298,8 +334,7 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 		}
 		break;
 	case PATTERN_RANDOM:
-		for (i = 0; i < size; i++)
-			devc->logic_data[i] = (uint8_t)(rand() & 0xff);
+		demo_fill_random(&devc->prng_state, devc->logic_data, (size_t)size);
 		break;
 	case PATTERN_INC:
 		for (i = 0; i < size; i += devc->logic_unitsize) {
@@ -452,6 +487,272 @@ static void logic_fixup_feed(struct dev_context *devc,
 		sample[fp_off] &= fp_mask;
 		for (idx = fp_off + 1; idx < logic->unitsize; idx++)
 			sample[idx] = 0x00;
+	}
+}
+
+/* Pack 8 sample values into 1 byte per channel in LA_CROSS_DATA format.
+ * For each channel ch, extracts bit ch from each of 8 samples and packs
+ * them into a single byte: bit b = sample b's channel ch value.
+ * group points to the start of a 64-sample group (num_channels * 8 bytes).
+ * s8 is the byte index within each channel's 8-byte block (0-7). */
+static inline void pack_8_cross(uint8_t *group, int s8,
+	const uint64_t vals[8], int num_channels)
+{
+	for (int ch = 0; ch < num_channels; ch++) {
+		uint64_t mask = 1ULL << ch;
+		group[ch * 8 + s8] = (uint8_t)(
+			(!!(vals[0] & mask))       |
+			(!!(vals[1] & mask)) << 1  |
+			(!!(vals[2] & mask)) << 2  |
+			(!!(vals[3] & mask)) << 3  |
+			(!!(vals[4] & mask)) << 4  |
+			(!!(vals[5] & mask)) << 5  |
+			(!!(vals[6] & mask)) << 6  |
+			(!!(vals[7] & mask)) << 7);
+	}
+}
+
+/* Generate logic data directly in LA_CROSS_DATA channel-block format.
+ *
+ * This is the unified fast path for ALL pattern types. It eliminates three
+ * passes (logic_generator → logic_fixup_feed → convert_to_cross_data) and
+ * replaces them with a single pass that writes directly to cross_data_buf.
+ *
+ * For each group of 64 samples, each channel gets 8 bytes (64 bits packed
+ * 8 per byte). The function handles:
+ *   - All 9 pattern types (SIGROK, RANDOM, INC, WALKING_ONE/ZERO,
+ *     ALL_LOW/HIGH, SQUID, GRAYCODE)
+ *   - Disabled channel masking (fixup) in cross domain
+ *   - PWM override (channels 6/7) in cross domain
+ *
+ * start_sample_index is the absolute sample index of the first sample in
+ * this batch (= devc->sent_samples + logic_done), needed for PWM phase. */
+static void logic_generator_cross(struct sr_dev_inst *sdi,
+	uint64_t num_samples, uint64_t start_sample_index)
+{
+	struct dev_context *devc = sdi->priv;
+	size_t unitsize = devc->logic_unitsize;
+	int num_channels = (int)(unitsize * 8);
+	uint64_t num_groups = num_samples / 64;
+	uint8_t *dst = devc->cross_data_buf;
+	size_t group_size = (size_t)num_channels * 8;
+
+	switch (devc->logic_pattern) {
+	case PATTERN_RANDOM:
+		demo_fill_random(&devc->prng_state, dst,
+			num_groups * group_size);
+		break;
+
+	case PATTERN_ALL_LOW:
+		memset(dst, 0, num_groups * group_size);
+		break;
+
+	case PATTERN_ALL_HIGH:
+		memset(dst, 0xff, num_groups * group_size);
+		break;
+
+	case PATTERN_SIGROK:
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					uint64_t step = devc->step;
+					vals[b] = 0;
+					for (size_t j = 0; j < unitsize; j++) {
+						uint8_t pat = pattern_sigrok[
+							(step + j) % sizeof(pattern_sigrok)] >> 1;
+						vals[b] |= ((uint64_t)(uint8_t)~pat) << (j * 8);
+					}
+					devc->step++;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+
+	case PATTERN_INC:
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				vals[0] = devc->step++;
+				vals[1] = devc->step++;
+				vals[2] = devc->step++;
+				vals[3] = devc->step++;
+				vals[4] = devc->step++;
+				vals[5] = devc->step++;
+				vals[6] = devc->step++;
+				vals[7] = devc->step++;
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+
+	case PATTERN_WALKING_ONE: {
+		uint64_t high_bit = (uint64_t)1 << (devc->num_logic_channels - 1);
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					vals[b] = devc->step;
+					if (devc->step == 0)
+						devc->step = 1;
+					else if (devc->step == high_bit)
+						devc->step = 0;
+					else
+						devc->step <<= 1;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+	}
+
+	case PATTERN_WALKING_ZERO: {
+		uint64_t high_bit = (uint64_t)1 << (devc->num_logic_channels - 1);
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					vals[b] = ~devc->step;
+					if (devc->step == 0)
+						devc->step = 1;
+					else if (devc->step == high_bit)
+						devc->step = 0;
+					else
+						devc->step <<= 1;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+	}
+
+	case PATTERN_SQUID: {
+		size_t col_count = ARRAY_SIZE(pattern_squid);
+		size_t col_height = ARRAY_SIZE(pattern_squid[0]);
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					const uint8_t *image_col = pattern_squid[devc->step];
+					vals[b] = 0;
+					for (size_t j = 0; j < unitsize; j++)
+						vals[b] |= ((uint64_t)image_col[j % col_height]) << (j * 8);
+					devc->step++;
+					devc->step %= col_count;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+	}
+
+	case PATTERN_GRAYCODE:
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					devc->step++;
+					devc->step &= devc->all_logic_channels_mask;
+					uint64_t gray = devc->step ^ (devc->step >> 1);
+					vals[b] = gray & devc->all_logic_channels_mask;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+
+	default:
+		memset(dst, 0, num_groups * group_size);
+		sr_err("Unknown pattern: %d.", devc->logic_pattern);
+		break;
+	}
+
+	/* Apply fixup: mask disabled channels in cross domain.
+	 * In cross format, channel ch's 8 bytes are at offset ch*8
+	 * within each group. For channels beyond first_partial_logic_index,
+	 * zero their 8 bytes. For the partial byte at first_partial_logic_index,
+	 * mask with first_partial_logic_mask. */
+	if (devc->first_partial_logic_index != unitsize) {
+		int fp_idx = (int)devc->first_partial_logic_index;
+		uint8_t fp_mask = devc->first_partial_logic_mask;
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				group[fp_idx * 8 + s8] &= fp_mask;
+				for (int idx = fp_idx + 1; idx < (int)unitsize; idx++)
+					group[idx * 8 + s8] = 0;
+			}
+		}
+	}
+
+	/* Apply PWM override in cross domain.
+	 * PWM0 replaces channel 6's bit, PWM1 replaces channel 7's bit.
+	 * In cross format, channel ch's data is at offset ch*8 per group,
+	 * 8 bytes = 64 packed bits. We recompute the channel's 8 bytes
+	 * using the DDS phase accumulator, matching logic_generator's PWM. */
+	if (devc->pwm0_en || devc->pwm1_en) {
+		uint32_t pwm0_step = 0, pwm0_thresh = 0;
+		uint32_t pwm1_step = 0, pwm1_thresh = 0;
+
+		if (devc->pwm0_en && devc->pwm0_freq > 0 &&
+				devc->cur_samplerate > 0) {
+			double step_d = (double)devc->pwm0_freq * 4294967296.0
+					/ (double)devc->cur_samplerate;
+			if (step_d < 4294967296.0)
+				pwm0_step = (uint32_t)step_d;
+			pwm0_thresh = (devc->pwm0_duty >= 100.0) ? 0xFFFFFFFF :
+				      (devc->pwm0_duty <= 0.0) ? 0 :
+				      (uint32_t)(devc->pwm0_duty * 4294967296.0 / 100.0);
+		}
+		if (devc->pwm1_en && devc->pwm1_freq > 0 &&
+				devc->cur_samplerate > 0) {
+			double step_d = (double)devc->pwm1_freq * 4294967296.0
+					/ (double)devc->cur_samplerate;
+			if (step_d < 4294967296.0)
+				pwm1_step = (uint32_t)step_d;
+			pwm1_thresh = (devc->pwm1_duty >= 100.0) ? 0xFFFFFFFF :
+				      (devc->pwm1_duty <= 0.0) ? 0 :
+				      (uint32_t)(devc->pwm1_duty * 4294967296.0 / 100.0);
+		}
+
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			if (pwm0_step > 0 && num_channels > 6) {
+				uint8_t *ch6 = group + 6 * 8;
+				for (int s8 = 0; s8 < 8; s8++) {
+					uint8_t byte = 0;
+					for (int b = 0; b < 8; b++) {
+						uint64_t idx = start_sample_index
+							+ g * 64 + (uint64_t)s8 * 8 + (uint64_t)b;
+						uint32_t phase = (uint32_t)(idx * (uint64_t)pwm0_step);
+						if (phase < pwm0_thresh)
+							byte |= (1u << b);
+					}
+					ch6[s8] = byte;
+				}
+			}
+			if (pwm1_step > 0 && num_channels > 7) {
+				uint8_t *ch7 = group + 7 * 8;
+				for (int s8 = 0; s8 < 8; s8++) {
+					uint8_t byte = 0;
+					for (int b = 0; b < 8; b++) {
+						uint64_t idx = start_sample_index
+							+ g * 64 + (uint64_t)s8 * 8 + (uint64_t)b;
+						uint32_t phase = (uint32_t)(idx * (uint64_t)pwm1_step);
+						if (phase < pwm1_thresh)
+							byte |= (1u << b);
+					}
+					ch7[s8] = byte;
+				}
+			}
+		}
 	}
 }
 
@@ -1246,12 +1547,17 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	 * preventing stop-request processing and causing backpressure
 	 * stalls that freeze the UI.
 	 *
-	 * Capping to a fixed maximum keeps each tick under ~5 ms. The
+	 * Capping to a fixed maximum keeps each tick lightweight. The
 	 * driver falls behind real-time at high rates (the capture takes
 	 * longer in wall-clock time), but data flows smoothly, stop is
 	 * responsive, and the UI stays interactive. This is the expected
-	 * trade-off for a software simulator — real hardware uses DMA. */
-#define DEMO_MAX_SAMPLES_PER_TICK 500000
+	 * trade-off for a software simulator — real hardware uses DMA.
+	 *
+	 * 2 M samples/tick: with the xorshift32 fast PRNG + direct
+	 * LA_CROSS_DATA generation, each tick costs ~8 ms (fill + send),
+	 * well within the 25 ms budget. At 1 GHz this yields 80 M samples/s
+	 * = 80 ms of data per wall-clock second — 8x the old 500K cap. */
+#define DEMO_MAX_SAMPLES_PER_TICK 2000000
 	if (samples_todo > DEMO_MAX_SAMPLES_PER_TICK)
 		samples_todo = DEMO_MAX_SAMPLES_PER_TICK;
 
@@ -1294,99 +1600,46 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	if (!devc->enabled_analog_channels)
 		analog_done = samples_todo;
 
+	/* Pre-compute fast path eligibility.
+	 *
+	 * logic_generator_cross() handles ALL pattern types, disabled
+	 * channels (fixup), and PWM override directly in LA_CROSS_DATA
+	 * format — no intermediate interleaved buffer needed. The only
+	 * case that requires the standard path is when a trigger is
+	 * active and not yet fired (soft_trigger_logic_check needs
+	 * interleaved data in logic_data).
+	 *
+	 * This eliminates 3 memory passes (generate → fixup → convert)
+	 * and replaces them with 1 pass (generate directly in cross). */
+	int direct_cross = (!devc->stl || devc->trigger_fired);
+
 	while (logic_done < samples_todo || analog_done < samples_todo) {
 		/* Logic */
 		if (logic_done < samples_todo) {
 			sending_now = MIN(samples_todo - logic_done,
 					LOGIC_BUFSIZE / devc->logic_unitsize);
-			logic_generator(sdi, sending_now * devc->logic_unitsize);
 
-			trigger_offset = 0;
-			/* Trigger check: runs in BOTH modes. In Stream mode the trigger
-			 * just inserts a SR_DF_TRIGGER marker into the stream (via
-			 * std_session_send_df_trigger inside soft_trigger_logic_check).
-			 * In Buffer mode it gates data emission until fire. */
-			if (devc->stl && (!devc->trigger_fired)) {
-			/* Per-tick trigger check log — sr_dbg to avoid flooding at 25ms ticks. */
-			sr_dbg("demo trigger check: sending_now=%" PRIu64
-				", logic_unitsize=%zu, data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x"
-				", stl->count=%d, op_mode=%d",
-				sending_now, devc->logic_unitsize,
-				devc->logic_data[0], devc->logic_data[1],
-				devc->logic_data[2], devc->logic_data[3],
-				devc->logic_data[4], devc->logic_data[5],
-				devc->logic_data[6], devc->logic_data[7],
-				devc->stl->count, devc->op_mode);
-				trigger_offset = soft_trigger_logic_check(devc->stl,
-						devc->logic_data, sending_now * devc->logic_unitsize,
-						&pre_trigger_samples);
-			sr_dbg("demo trigger check: soft_trigger_logic_check returned %d"
-				", pre_trigger_samples=%d",
-				(int)trigger_offset, pre_trigger_samples);
-				if (trigger_offset > -1) {
-					devc->trigger_fired = TRUE;
-					sr_info("demo trigger FIRED at offset %d (op_mode=%d)",
-						(int)trigger_offset, devc->op_mode);
-					/* In Buffer mode, reset logic_done to pre_trigger_samples
-					 * so pre-trigger data (already sent by soft_trigger_logic_check)
-					 * isn't double-counted. In Stream mode we already sent the
-					 * full buffer above, so just mark fired and continue. */
-					if (devc->op_mode == DEMO_OP_BUFFER)
-						logic_done = pre_trigger_samples;
-				}
-			}
-
-			/* Send logic samples as LA_CROSS_DATA (channel-block format),
-			 * matching pxlogic's hardware DMA layout. This exercises the
-			 * frontend's append_cross_payload + bit-align code path, which
-			 * would otherwise never be tested with the demo driver. */
 			packet.type = SR_DF_LOGIC;
 			packet.payload = &logic;
 			logic.unitsize = devc->logic_unitsize;
 
-			/* Determine data range based on trigger state */
-			uint8_t *logic_src = devc->logic_data;
-			uint64_t logic_send_samples = sending_now;
-
-			if (devc->stl && devc->op_mode == DEMO_OP_BUFFER) {
-				/* Buffer mode: only send AFTER trigger fires. */
-				if (devc->trigger_fired && (trigger_offset < (int)sending_now)) {
-					logic_src = devc->logic_data + trigger_offset * devc->logic_unitsize;
-					logic_send_samples = sending_now - trigger_offset;
-				} else {
-					logic_send_samples = 0;
-					/* Trigger not yet fired: send nothing but advance
-					 * logic_done so we don't loop forever. */
-					logic_done += sending_now;
-				}
-			}
-
-			if (logic_send_samples > 0) {
-				/* Apply fixup on sample-interleaved data (masks disabled
-				 * channel bits in-place). */
-				logic.length = logic_send_samples * devc->logic_unitsize;
-				logic.data = logic_src;
-				logic_fixup_feed(devc, &logic);
-
-				/* Convert to LA_CROSS_DATA channel-block format.
-				 * Round down to a multiple of 64 (one chunk = 64 samples
-				 * per channel). Any remainder is deferred to next tick. */
-				uint64_t cross_samples = (logic_send_samples / 64) * 64;
+			if (direct_cross) {
+				/* ═══ Fast path: direct LA_CROSS_DATA generation ═══
+				 * logic_generator_cross handles all pattern types,
+				 * disabled channels (fixup), and PWM override in one
+				 * pass — no logic_generator/fixup/convert needed. */
+				uint64_t cross_samples = (sending_now / 64) * 64;
 				if (cross_samples > 0) {
-					convert_to_cross_data(logic_src, devc->cross_data_buf,
-						cross_samples, devc->logic_unitsize);
-					uint64_t cross_len = cross_samples * devc->logic_unitsize;
+					uint64_t cross_len = cross_samples *
+						devc->logic_unitsize;
+					logic_generator_cross(sdi, cross_samples,
+						devc->sent_samples + logic_done);
 
-					/* Simulate real hardware: the last packet before stop
-					 * often ends with a partial chunk (not a multiple of
-					 * channel_num * 8 bytes), because USB transfers are
-					 * sized by the DMA engine. This leaves _ch_fraction
-					 * or _byte_fraction non-zero, triggering the bit-align
-					 * phase in append_cross_payload on the next packet. */
 					if (!devc->loop_mode && devc->limit_samples > 0 &&
 						devc->sent_samples + logic_done + cross_samples
-							>= devc->limit_samples) {
-						uint64_t chunk_sz = (uint64_t)devc->logic_unitsize * 64;
+								>= devc->limit_samples) {
+						uint64_t chunk_sz =
+							(uint64_t)devc->logic_unitsize * 64;
 						if (cross_len > chunk_sz + 3)
 							cross_len -= 3;
 					}
@@ -1396,8 +1649,101 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 					logic.format = LA_CROSS_DATA;
 					sr_session_send(sdi, &packet);
 				}
-				logic_done += logic_send_samples;
-			}
+				logic_done += sending_now;
+			} else {
+			/* ═══ Standard path: generate interleaved + convert ═══ */
+				logic_generator(sdi, sending_now * devc->logic_unitsize);
+
+				trigger_offset = 0;
+				/* Trigger check: runs in BOTH modes. In Stream mode the trigger
+				 * just inserts a SR_DF_TRIGGER marker into the stream (via
+				 * std_session_send_df_trigger inside soft_trigger_logic_check).
+				 * In Buffer mode it gates data emission until fire. */
+				if (devc->stl && (!devc->trigger_fired)) {
+				/* Per-tick trigger check log — sr_dbg to avoid flooding at 25ms ticks. */
+				sr_dbg("demo trigger check: sending_now=%" PRIu64
+					", logic_unitsize=%zu, data[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x"
+					", stl->count=%d, op_mode=%d",
+					sending_now, devc->logic_unitsize,
+					devc->logic_data[0], devc->logic_data[1],
+					devc->logic_data[2], devc->logic_data[3],
+					devc->logic_data[4], devc->logic_data[5],
+					devc->logic_data[6], devc->logic_data[7],
+					devc->stl->count, devc->op_mode);
+					trigger_offset = soft_trigger_logic_check(devc->stl,
+							devc->logic_data, sending_now * devc->logic_unitsize,
+							&pre_trigger_samples);
+				sr_dbg("demo trigger check: soft_trigger_logic_check returned %d"
+					", pre_trigger_samples=%d",
+					(int)trigger_offset, pre_trigger_samples);
+					if (trigger_offset > -1) {
+						devc->trigger_fired = TRUE;
+						sr_info("demo trigger FIRED at offset %d (op_mode=%d)",
+							(int)trigger_offset, devc->op_mode);
+						/* In Buffer mode, reset logic_done to pre_trigger_samples
+						 * so pre-trigger data (already sent by soft_trigger_logic_check)
+						 * isn't double-counted. In Stream mode we already sent the
+						 * full buffer above, so just mark fired and continue. */
+						if (devc->op_mode == DEMO_OP_BUFFER)
+							logic_done = pre_trigger_samples;
+					}
+				}
+
+				/* Determine data range based on trigger state */
+				uint8_t *logic_src = devc->logic_data;
+				uint64_t logic_send_samples = sending_now;
+
+				if (devc->stl && devc->op_mode == DEMO_OP_BUFFER) {
+					/* Buffer mode: only send AFTER trigger fires. */
+					if (devc->trigger_fired && (trigger_offset < (int)sending_now)) {
+						logic_src = devc->logic_data + trigger_offset * devc->logic_unitsize;
+						logic_send_samples = sending_now - trigger_offset;
+					} else {
+						logic_send_samples = 0;
+						/* Trigger not yet fired: send nothing but advance
+						 * logic_done so we don't loop forever. */
+						logic_done += sending_now;
+					}
+				}
+
+				if (logic_send_samples > 0) {
+					/* Apply fixup on sample-interleaved data (masks disabled
+					 * channel bits in-place). */
+					logic.length = logic_send_samples * devc->logic_unitsize;
+					logic.data = logic_src;
+					logic_fixup_feed(devc, &logic);
+
+					/* Convert to LA_CROSS_DATA channel-block format.
+					 * Round down to a multiple of 64 (one chunk = 64 samples
+					 * per channel). Any remainder is deferred to next tick. */
+					uint64_t cross_samples = (logic_send_samples / 64) * 64;
+					if (cross_samples > 0) {
+						convert_to_cross_data(logic_src, devc->cross_data_buf,
+							cross_samples, devc->logic_unitsize);
+						uint64_t cross_len = cross_samples * devc->logic_unitsize;
+
+						/* Simulate real hardware: the last packet before stop
+						 * often ends with a partial chunk (not a multiple of
+						 * channel_num * 8 bytes), because USB transfers are
+						 * sized by the DMA engine. This leaves _ch_fraction
+						 * or _byte_fraction non-zero, triggering the bit-align
+						 * phase in append_cross_payload on the next packet. */
+						if (!devc->loop_mode && devc->limit_samples > 0 &&
+							devc->sent_samples + logic_done + cross_samples
+									>= devc->limit_samples) {
+							uint64_t chunk_sz = (uint64_t)devc->logic_unitsize * 64;
+							if (cross_len > chunk_sz + 3)
+								cross_len -= 3;
+						}
+
+						logic.length = cross_len;
+						logic.data = devc->cross_data_buf;
+						logic.format = LA_CROSS_DATA;
+						sr_session_send(sdi, &packet);
+					}
+					logic_done += logic_send_samples;
+				}
+			} /* end standard path */
 		}
 
 		/* Analog, one channel at a time */

@@ -452,6 +452,12 @@ struct dev_context {
 	 * app-layer SR_CONF_STREAM_MEM_BUFF / SR_CONF_STREAM_BUFF (16GB default)
 	 * is used instead — matching pxlogic's stream mode behavior. */
 	uint64_t simulated_hw_depth;
+
+	/* Fast PRNG state (xorshift32). rand() on Windows is ~150 ns/call;
+	 * at 1 GHz with 500K samples/tick and unitsize=2, that's 1 M calls =
+	 * 150 ms — 6x the tick budget. xorshift32 is ~3 ns/call (50x faster),
+	 * bringing the same workload to ~3 ms. */
+	uint32_t prng_state;
 };
 
 struct analog_gen {

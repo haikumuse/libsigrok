@@ -541,6 +541,13 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	 * bounding the sample depth dropdown like real hardware. */
 	devc->simulated_hw_depth = (uint64_t)4000000000ULL;
 
+	/* Seed xorshift32 PRNG with a non-zero value (xorshift requires
+	 * a non-zero seed). Use wall-clock time for per-run variability,
+	 * falling back to a fixed seed if time is 0. */
+	devc->prng_state = (uint32_t)(g_get_monotonic_time() & 0xFFFFFFFF);
+	if (devc->prng_state == 0)
+		devc->prng_state = 0x12345678;
+
 	if (num_logic_channels > 0) {
 		/* Logic channels, all in one channel group. */
 		cg = sr_channel_group_new(sdi, "Logic", NULL);
