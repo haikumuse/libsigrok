@@ -330,8 +330,11 @@ static void set_logic_data(uint64_t bits, uint8_t *data, size_t len)
  *   bit 37:     STOP  (SDA rising while SCL high)
  * Total: 38 bits per transaction (3 data bytes)
  *
- * Address starts at 0x50 and increments each transaction.
- * Data bytes increment within each transaction (0x00, 0x01, 0x02).
+ * Address is fixed at 0x50 (standard 24C02 EEPROM device address).
+ * Data bytes form an EEPROM write sequence:
+ *   DATA0 = word address (increments each transaction)
+ *   DATA1 = data value 1 (0x10 + low nibble of frame)
+ *   DATA2 = data value 2 (0x20 + low nibble of frame)
  *
  * Bit encoding within each I2C bit time (I2C_BITTIME samples):
  *   For data bits: first half SCL=low (SDA can change),
@@ -347,7 +350,7 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 {
 	uint32_t frame_bit = bit_idx % I2C_FRAME_BITS;
 	uint32_t frame_num = bit_idx / I2C_FRAME_BITS;
-	uint8_t addr = 0x50 + (uint8_t)(frame_num & 0x3F);
+	uint8_t addr = 0x50; /* Fixed EEPROM device address (24C02) */
 	uint8_t is_high_phase = (bit_phase >= bittime / 2) ? 1 : 0;
 	uint8_t scl_val = 0, sda_val = 0;
 
@@ -402,15 +405,18 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 				byte_val = 0; /* R/W = write */
 			}
 		} else if (frame_bit >= 10 && frame_bit <= 17) {
-			uint8_t data0 = (uint8_t)(0xFF ^ (frame_num & 0xFF));
+			/* EEPROM word address (increments each transaction) */
+			uint8_t data0 = (uint8_t)(frame_num & 0xFF);
 			bit_in_byte = 7 - (frame_bit - 10);
 			byte_val = (data0 >> bit_in_byte) & 1;
 		} else if (frame_bit >= 19 && frame_bit <= 26) {
-			uint8_t data1 = (uint8_t)(0xAA ^ (frame_num & 0xFF));
+			/* EEPROM data byte 1 */
+			uint8_t data1 = (uint8_t)(0x10 + (frame_num & 0x0F));
 			bit_in_byte = 7 - (frame_bit - 19);
 			byte_val = (data1 >> bit_in_byte) & 1;
 		} else if (frame_bit >= 28 && frame_bit <= 35) {
-			uint8_t data2 = (uint8_t)(0x55 ^ (frame_num & 0xFF));
+			/* EEPROM data byte 2 */
+			uint8_t data2 = (uint8_t)(0x20 + (frame_num & 0x0F));
 			bit_in_byte = 7 - (frame_bit - 28);
 			byte_val = (data2 >> bit_in_byte) & 1;
 		}
@@ -440,28 +446,69 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
  * 8 buses, each with C + Python decoder = 16 decoders total.
  */
 
-/* SPI frame: 10 bit times (1 idle + 8 data + 1 idle). */
-#define SPI_FRAME_BITS 10
+/* SPI Flash READ command frame:
+ *   byte 0: 0x03 (READ Data command)
+ *   byte 1: 0x00 (address bits 23-16)
+ *   byte 2: 0x00 (address bits 15-8)
+ *   byte 3: frame_num & 0xFF (address bits 7-0, increments each frame)
+ *   byte 4: 0x10 + (frame_num & 0x0F) (data byte from flash, on MISO)
+ * CS stays LOW for all 5 bytes (40 bits), then 10 idle bits (CS high).
+ * Total: 50 bits per frame.
+ *
+ * This produces valid SPI Flash traffic that the spiflash decoder
+ * can decode: it sees READ commands with incrementing addresses
+ * and recognizable data bytes on MISO. */
+#define SPI_FLASH_CMD_BYTES	5
+#define SPI_FLASH_IDLE_BITS	10
+#define SPI_FRAME_BITS		(SPI_FLASH_CMD_BYTES * 8 + SPI_FLASH_IDLE_BITS)
 
 static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t bittime, uint32_t data_offset,
 	uint8_t *cs, uint8_t *sclk, uint8_t *mosi, uint8_t *miso)
 {
-	uint32_t spi_bit = bit_idx % SPI_FRAME_BITS;
-	uint32_t spi_frame = bit_idx / SPI_FRAME_BITS;
-	uint8_t spi_data = (uint8_t)((spi_frame + data_offset) & 0xFF);
+	uint32_t frame_bit = bit_idx % SPI_FRAME_BITS;
+	uint32_t frame_num = bit_idx / SPI_FRAME_BITS;
 	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+	uint32_t cmd_bits = SPI_FLASH_CMD_BYTES * 8;
+	uint8_t addr_low = (uint8_t)((frame_num + data_offset) & 0xFF);
 
-	if (spi_bit == 0 || spi_bit == 9) {
+	if (frame_bit >= cmd_bits) {
+		/* Idle gap: CS high, SCLK low, lines idle */
 		*cs = 1; *sclk = 0; *mosi = 0; *miso = 0;
-	} else {
-		int bit_in_byte = 7 - (spi_bit - 1);
-		uint8_t data_bit = (spi_data >> bit_in_byte) & 1;
-		*cs = 0;
-		*sclk = is_high;
-		*mosi = data_bit;
-		*miso = data_bit ^ 1;
+		return;
 	}
+
+	/* CS low during command + address + data bytes */
+	*cs = 0;
+	*sclk = is_high;
+
+	uint32_t byte_idx = frame_bit / 8;
+	int bit_in_byte = 7 - (frame_bit % 8); /* MSB first */
+	uint8_t mosi_byte = 0xFF, miso_byte = 0xFF;
+
+	switch (byte_idx) {
+	case 0: /* Command byte: 0x03 = READ */
+		mosi_byte = 0x03;
+		break;
+	case 1: /* Address high byte */
+		mosi_byte = 0x00;
+		break;
+	case 2: /* Address mid byte */
+		mosi_byte = 0x00;
+		break;
+	case 3: /* Address low byte (increments) */
+		mosi_byte = addr_low;
+		break;
+	case 4: /* Data byte from flash (on MISO) */
+		mosi_byte = 0xFF; /* dummy on MOSI */
+		miso_byte = (uint8_t)(0x10 + ((frame_num + data_offset) & 0x0F));
+		break;
+	default:
+		break;
+	}
+
+	*mosi = (mosi_byte >> bit_in_byte) & 1;
+	*miso = (miso_byte >> bit_in_byte) & 1;
 }
 
 /* UART frame: 10 bit times (1 start + 8 data LSB-first + 1 stop). */
