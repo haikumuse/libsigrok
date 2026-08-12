@@ -814,6 +814,30 @@ SR_PRIV gboolean dsl_probe_fgain_inrange(struct sr_channel *probe, gboolean comb
 SR_PRIV int dsl_fpga_arm(const struct sr_dev_inst *sdi);
 SR_PRIV int dsl_fpga_config(struct libusb_device_handle *hdl, const char *filename);
 
+/* DSO command IDs for dslogic_dso_cmd_gen() (fork-only, not upstream SR_CONF_*). */
+#define DSO_CMD_PROBE_VDIV		0x1001
+#define DSO_CMD_PROBE_EN		0x1002
+#define DSO_CMD_TIMEBASE		0x1003
+#define DSO_CMD_PROBE_COUPLING		0x1004
+#define DSO_CMD_SAMPLERATE		0x1005
+#define DSO_CMD_HORIZ_TRIGGERPOS	0x1006
+#define DSO_CMD_TRIGGER_SLOPE		0x1007
+#define DSO_CMD_TRIGGER_SOURCE		0x1008
+#define DSO_CMD_TRIGGER_VALUE		0x1009
+#define DSO_CMD_TRIGGER_MARGIN		0x100A
+#define DSO_CMD_TRIGGER_HOLDOFF		0x100B
+#define DSO_CMD_DSO_SYNC			0x100C
+
+/* Coupling values (match coupling_strs[] in api.c: GND=0, DC=1, AC=2). */
+#define DSL_COUPLING_GND	0
+#define DSL_COUPLING_DC		1
+#define DSL_COUPLING_AC		2
+
+/* DSO command generation and initialization (ported from fork dslogic.c). */
+SR_PRIV uint64_t dslogic_dso_cmd_gen(const struct sr_dev_inst *sdi,
+	struct sr_channel *ch, int cmd_id);
+SR_PRIV int dslogic_dso_init(const struct sr_dev_inst *sdi);
+
 SR_PRIV int dsl_config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *sdi,
 			const struct sr_channel_group *cg);
 SR_PRIV int dsl_config_set(uint32_t key, GVariant *data, struct sr_dev_inst *sdi,

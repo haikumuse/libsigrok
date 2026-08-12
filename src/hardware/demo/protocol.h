@@ -54,6 +54,10 @@
 #define DEFAULT_ANALOG_AMPLITUDE		10
 #define DEFAULT_ANALOG_OFFSET			0.
 
+/* I2C pattern: samples per I2C bit time. At 1 MHz sample rate,
+ * this gives 100 kHz I2C bus speed (10 samples/bit). */
+#define I2C_BITTIME				10
+
 /* Cyclic random buffer length for PATTERN_ANALOG_RANDOM streaming. The buffer
  * is pre-filled once by init_analog_random_data() and read cyclically by
  * send_analog_packet(), mirroring old fork demo's analog random streaming. */
@@ -114,6 +118,15 @@ enum logic_pattern_type {
 
 	/** Gray encoded data, like rotary encoder signals. */
 	PATTERN_GRAYCODE,
+
+	/**
+	 * I2C bus traffic on ch0(SCL)/ch1(SDA). Generates START,
+	 * 7-bit address + R/W, ACK, data bytes, STOP, and repeated
+	 * START. Address increments each transaction; data bytes
+	 * increment within each transaction. This produces decodable
+	 * I2C traffic for protocol decoder testing.
+	 */
+	PATTERN_I2C,
 };
 
 /* Analog patterns we can generate. */

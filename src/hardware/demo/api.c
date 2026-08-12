@@ -45,6 +45,7 @@ static const char *logic_pattern_str[] = {
 	"all-high",
 	"squid",
 	"graycode",
+	"i2c",
 };
 
 /* Operation mode strings for config_get/set/list. Indexed by enum demo_op_mode.

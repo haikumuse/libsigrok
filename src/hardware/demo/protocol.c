@@ -310,6 +310,121 @@ static void set_logic_data(uint64_t bits, uint8_t *data, size_t len)
 	}
 }
 
+/* I2C pattern generator: produces a stream of valid I2C bus traffic
+ * on ch0(SCL) and ch1(SDA).
+ *
+ * The generator uses a frame-based approach. Each I2C transaction is:
+ *   START(1 bit) + ADDR(8 bits) + ACK(1 bit) + DATA(8 bits) + ACK(1 bit)
+ *   + ... + DATA(8 bits) + ACK(1 bit) + STOP(1 bit)
+ *
+ * Frame layout (bit indices):
+ *   bit 0:      START  (SDA falling while SCL high)
+ *   bits 1-8:   ADDRESS (7-bit + R/W, MSB first)
+ *   bit 9:      ACK (slave pulls SDA low)
+ *   bits 10-17: DATA byte 0 (MSB first)
+ *   bit 18:     ACK
+ *   bits 19-26: DATA byte 1
+ *   bit 27:     ACK
+ *   bits 28-35: DATA byte 2
+ *   bit 36:     ACK
+ *   bit 37:     STOP  (SDA rising while SCL high)
+ * Total: 38 bits per transaction (3 data bytes)
+ *
+ * Address starts at 0x50 and increments each transaction.
+ * Data bytes increment within each transaction (0x00, 0x01, 0x02).
+ *
+ * Bit encoding within each I2C bit time (I2C_BITTIME samples):
+ *   For data bits: first half SCL=low (SDA can change),
+ *   second half SCL=high (SDA stable).
+ *   For START: SCL stays high, SDA goes high→low.
+ *   For STOP: SCL stays high, SDA goes low→high.
+ */
+#define I2C_FRAME_BITS		38
+#define I2C_DATA_BYTES		3
+
+static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint8_t *scl, uint8_t *sda)
+{
+	uint32_t frame_bit = bit_idx % I2C_FRAME_BITS;
+	uint32_t frame_num = bit_idx / I2C_FRAME_BITS;
+	uint8_t addr = 0x50 + (uint8_t)(frame_num & 0x3F);
+	uint8_t is_high_phase = (bit_phase >= bittime / 2) ? 1 : 0;
+	uint8_t scl_val = 0, sda_val = 0;
+
+	/* Default: SCL toggles high in second half, low in first half.
+	 * SDA holds its value during SCL high, changes during SCL low. */
+
+	if (frame_bit == 0) {
+		/* START: SDA falls while SCL high.
+		 * First quarter: SDA high, SCL high (idle)
+		 * Second quarter: SDA low, SCL high (START edge)
+		 * Rest: SCL goes low to prepare for first data bit */
+		if (bit_phase < bittime / 4) {
+			scl_val = 1; sda_val = 1;
+		} else if (bit_phase < bittime / 2) {
+			scl_val = 1; sda_val = 0;
+		} else {
+			scl_val = 0; sda_val = 0;
+		}
+	} else if (frame_bit == 37) {
+		/* STOP: SDA rises while SCL high.
+		 * First quarter: SCL low, SDA low
+		 * Second quarter: SCL high, SDA low
+		 * Rest: SCL high, SDA high (idle) */
+		if (bit_phase < bittime / 4) {
+			scl_val = 0; sda_val = 0;
+		} else if (bit_phase < bittime / 2) {
+			scl_val = 1; sda_val = 0;
+		} else {
+			scl_val = 1; sda_val = 1;
+		}
+	} else if (frame_bit == 9 || frame_bit == 18 ||
+		   frame_bit == 27 || frame_bit == 36) {
+		/* ACK bit: slave pulls SDA low. SCL toggles normally. */
+		scl_val = is_high_phase;
+		sda_val = 0;
+	} else {
+		/* Data bit: determine which bit of address or data.
+		 * Bits 1-8: address (7-bit MSB first + R/W at bit 8).
+		 * R/W is always 0 (write) for simplicity.
+		 * Bits 10-17: data byte 0
+		 * Bits 19-26: data byte 1
+		 * Bits 28-35: data byte 2 */
+		uint8_t byte_val = 0;
+		int bit_in_byte = 0;
+
+		if (frame_bit >= 1 && frame_bit <= 8) {
+			/* Address: bits 1-7 are addr[6:0], bit 8 is R/W=0 */
+			if (frame_bit <= 7) {
+				bit_in_byte = 7 - (frame_bit - 1); /* MSB first */
+				byte_val = (addr >> bit_in_byte) & 1;
+			} else {
+				byte_val = 0; /* R/W = write */
+			}
+		} else if (frame_bit >= 10 && frame_bit <= 17) {
+			uint8_t data0 = (uint8_t)(frame_num & 0xFF);
+			bit_in_byte = 7 - (frame_bit - 10);
+			byte_val = (data0 >> bit_in_byte) & 1;
+		} else if (frame_bit >= 19 && frame_bit <= 26) {
+			uint8_t data1 = (uint8_t)((frame_num + 1) & 0xFF);
+			bit_in_byte = 7 - (frame_bit - 19);
+			byte_val = (data1 >> bit_in_byte) & 1;
+		} else if (frame_bit >= 28 && frame_bit <= 35) {
+			uint8_t data2 = (uint8_t)((frame_num + 2) & 0xFF);
+			bit_in_byte = 7 - (frame_bit - 28);
+			byte_val = (data2 >> bit_in_byte) & 1;
+		}
+
+		/* SCL toggles: low in first half, high in second half.
+		 * SDA is stable during SCL high, can change during SCL low. */
+		scl_val = is_high_phase;
+		sda_val = byte_val;
+	}
+
+	*scl = scl_val;
+	*sda = sda_val;
+}
+
 static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 {
 	struct dev_context *devc;
@@ -404,6 +519,34 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 			gray = encode_number_to_gray(devc->step);
 			gray &= devc->all_logic_channels_mask;
 			set_logic_data(gray, &devc->logic_data[i], devc->logic_unitsize);
+		}
+		break;
+	case PATTERN_I2C:
+		/* I2C pattern: ch0=SCL, ch1=SDA.
+		 * Uses devc->step as a global bit counter. Each I2C bit
+		 * occupies I2C_BITTIME samples. The pattern generator
+		 * is a simple state machine that cycles through:
+		 * START → ADDR(7+RW) → ACK → DATA(8) → ACK → ... → STOP.
+		 * Address starts at 0x50 and increments each transaction.
+		 * Data bytes start at 0x00 and increment within each.
+		 */
+		{
+			const uint32_t bittime = I2C_BITTIME;
+			uint32_t bit_phase = devc->step % bittime;
+			uint32_t bit_idx = devc->step / bittime;
+			uint8_t scl_bit, sda_bit;
+			i2c_get_bit(bit_idx, bit_phase, bittime, &scl_bit, &sda_bit);
+			uint64_t val = (uint64_t)scl_bit | ((uint64_t)sda_bit << 1);
+			set_logic_data(val, &devc->logic_data[0], devc->logic_unitsize);
+			for (i = devc->logic_unitsize; i < size; i += devc->logic_unitsize) {
+				devc->step++;
+				bit_phase = devc->step % bittime;
+				bit_idx = devc->step / bittime;
+				i2c_get_bit(bit_idx, bit_phase, bittime, &scl_bit, &sda_bit);
+				val = (uint64_t)scl_bit | ((uint64_t)sda_bit << 1);
+				set_logic_data(val, &devc->logic_data[i], devc->logic_unitsize);
+			}
+			devc->step++;
 		}
 		break;
 	default:
@@ -662,6 +805,26 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					devc->step &= devc->all_logic_channels_mask;
 					uint64_t gray = devc->step ^ (devc->step >> 1);
 					vals[b] = gray & devc->all_logic_channels_mask;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+	break;
+
+	case PATTERN_I2C:
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					uint32_t bit_phase = devc->step % I2C_BITTIME;
+					uint32_t bit_idx = devc->step / I2C_BITTIME;
+					uint8_t scl_bit, sda_bit;
+					i2c_get_bit(bit_idx, bit_phase,
+						I2C_BITTIME, &scl_bit, &sda_bit);
+					vals[b] = (uint64_t)scl_bit
+						| ((uint64_t)sda_bit << 1);
+					devc->step++;
 				}
 				pack_8_cross(group, s8, vals, num_channels);
 			}

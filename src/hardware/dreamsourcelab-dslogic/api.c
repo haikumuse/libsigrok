@@ -1536,6 +1536,8 @@ static int config_set(uint32_t key, GVariant *data,
 		if ((idx = std_u64_idx(data, devc->profile->dev_caps.samplerates, n)) < 0)
 			return SR_ERR_ARG;
 		devc->cur_samplerate = devc->profile->dev_caps.samplerates[idx];
+		if (devc->test_mode == DSL_TEST_NONE && devc->mode != DSL_MODE_LOGIC)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_SAMPLERATE));
 		break;
 	}
 	case SR_CONF_LIMIT_SAMPLES:
@@ -1639,9 +1641,10 @@ static int config_set(uint32_t key, GVariant *data,
 		nv = idx;
 		if (devc->mode == DSL_MODE_LOGIC && nv != devc->th_level) {
 			devc->th_level = nv;
-			/* dsl_fpga_config() will be called in Phase 3 */
-			sr_warn("FPGA reconfiguration for threshold change "
-				"will be implemented in Phase 3.");
+			/* Reload FPGA bitstream for the new voltage threshold. */
+			ret = dslogic_fpga_firmware_upload(sdi);
+			if (ret != SR_OK)
+				sr_err("FPGA reconfiguration for threshold change failed.");
 		}
 		break;
 	case SR_CONF_VTH:
@@ -1706,7 +1709,7 @@ static int config_set(uint32_t key, GVariant *data,
 			}
 		} else if (new_mode == DSL_MODE_DSO) {
 			dsl_wr_reg(sdi, CTR0_ADDR, bmSCOPE_SET);
-			dsl_wr_dso(sdi, 0xa5a5a500); /* DSO sync */
+			dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_DSO_SYNC));
 			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
 				if (channel_modes[i].mode == DSL_MODE_DSO &&
 				    (devc->profile->dev_caps.channels & (1ULL << i))) {
@@ -1724,7 +1727,7 @@ static int config_set(uint32_t key, GVariant *data,
 					devc->profile->dev_caps.dso_depth / num_probes;
 		} else if (new_mode == DSL_MODE_ANALOG) {
 			dsl_wr_reg(sdi, CTR0_ADDR, bmSCOPE_SET);
-			dsl_wr_dso(sdi, 0xa5a5a500); /* DSO sync */
+			dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_DSO_SYNC));
 			devc->op_mode = LO_OP_STREAM;
 			devc->test_mode = DSL_TEST_NONE;
 			for (i = 0; i < ARRAY_SIZE(channel_modes); i++) {
@@ -1742,6 +1745,9 @@ static int config_set(uint32_t key, GVariant *data,
 		}
 		if (num_probes > 0)
 			dsl_setup_probes(sdi, num_probes);
+		/* Send full DSO configuration after mode switch to DSO/ANALOG. */
+		if (new_mode != DSL_MODE_LOGIC && num_probes > 0)
+			dslogic_dso_init(sdi);
 		break;
 	}
 	case SR_CONF_LOOP_MODE:
@@ -1757,6 +1763,8 @@ static int config_set(uint32_t key, GVariant *data,
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
 		DSL_CH_PRIV(ch)->vdiv = g_variant_get_uint64(data);
+		if (devc->mode != DSL_MODE_LOGIC)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, ch, DSO_CMD_PROBE_VDIV));
 		break;
 	case SR_CONF_PROBE_FACTOR:
 		if (!ch || !ch->priv)
@@ -1768,6 +1776,11 @@ static int config_set(uint32_t key, GVariant *data,
 			return SR_ERR_ARG;
 		/* Accept int32 to match hwdriver.c SR_T_INT32 and demo driver. */
 		DSL_CH_PRIV(ch)->coupling = (uint8_t)g_variant_get_int32(data);
+		/* GND coupling is treated as DC by the hardware. */
+		if (DSL_CH_PRIV(ch)->coupling == DSL_COUPLING_GND)
+			DSL_CH_PRIV(ch)->coupling = DSL_COUPLING_DC;
+		if (devc->mode != DSL_MODE_LOGIC)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, ch, DSO_CMD_PROBE_COUPLING));
 		break;
 	case SR_CONF_PROBE_OFFSET:
 		if (!ch || !ch->priv)
@@ -1778,23 +1791,39 @@ static int config_set(uint32_t key, GVariant *data,
 		if (!ch)
 			return SR_ERR_ARG;
 		ch->enabled = g_variant_get_boolean(data);
+		if (devc->mode == DSL_MODE_DSO) {
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, ch, DSO_CMD_PROBE_EN));
+			/* Recalculate samplerate divider when channel count changes. */
+			if (dsl_en_ch_num(sdi) != 0)
+				ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_SAMPLERATE));
+		}
 		break;
 	case SR_CONF_TRIGGER_SLOPE:
 		devc->trigger_slope = g_variant_get_byte(data);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_SLOPE));
 		break;
 	case SR_CONF_TRIGGER_SOURCE:
 		devc->trigger_source = (devc->trigger_source & 0xf0) |
 			(g_variant_get_byte(data) & 0x0f);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_SOURCE));
 		break;
 	case SR_CONF_TRIGGER_CHANNEL:
 		devc->trigger_source = (g_variant_get_byte(data) << 4) |
 			(devc->trigger_source & 0x0f);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_SOURCE));
 		break;
 	case SR_CONF_TRIGGER_HOLDOFF:
 		devc->trigger_holdoff = g_variant_get_uint64(data);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_HOLDOFF));
 		break;
 	case SR_CONF_TRIGGER_MARGIN:
 		devc->trigger_margin = g_variant_get_byte(data);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_MARGIN));
 		break;
 	case SR_CONF_HORIZ_TRIGGERPOS:
 		/* Accept double (SR_T_FLOAT) from GUI, store as uint8_t. */
@@ -1802,6 +1831,7 @@ static int config_set(uint32_t key, GVariant *data,
 			devc->trigger_hrate = (uint8_t)g_variant_get_double(data);
 			devc->trigger_hpos = devc->trigger_hrate *
 				dsl_en_ch_num(sdi) * devc->limit_samples / 200.0;
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_HORIZ_TRIGGERPOS));
 		} else {
 			devc->trigger_hpos = (uint8_t)g_variant_get_double(data) *
 				devc->limit_samples / 100.0;
@@ -1822,12 +1852,13 @@ static int config_set(uint32_t key, GVariant *data,
 		break;
 	case SR_CONF_TRIGGER_VALUE:
 		/* DSO trigger level (per-channel). 8-bit value stored in
-		 * dsl_channel_priv.trig_value. For real hardware, the actual
-		 * trigger DAC is configured via dsl_wr_dso() in fpga_arm().
+		 * dsl_channel_priv.trig_value. Sent to hardware via dsl_wr_dso().
 		 * Accept int32 to match hwdriver.c SR_T_INT32. */
 		if (!ch || !ch->priv)
 			return SR_ERR_ARG;
 		DSL_CH_PRIV(ch)->trig_value = (uint8_t)g_variant_get_int32(data);
+		if (devc->mode == DSL_MODE_DSO)
+			ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, ch, DSO_CMD_TRIGGER_VALUE));
 		break;
 	case SR_CONF_PROBE_HW_OFFSET:
 		/* Hardware offset (per-channel). Normally auto-updated by

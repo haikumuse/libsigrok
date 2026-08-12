@@ -1384,8 +1384,22 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 	if ((ret = command_stop_acquisition(sdi)) != SR_OK)
 		return ret;
 
-	if ((ret = fpga_configure(sdi)) != SR_OK)
-		return ret;
+	if (devc->mode == DSL_MODE_LOGIC) {
+		if ((ret = fpga_configure(sdi)) != SR_OK)
+			return ret;
+	} else {
+		/* DSO / ANALOG mode: send DSO sync, update trigger position,
+		 * then arm the FPGA with full DSL_setting via dsl_fpga_arm(). */
+		devc->actual_samples = devc->limit_samples;
+		ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_DSO_SYNC));
+		if (ret != SR_OK)
+			return ret;
+		ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_HORIZ_TRIGGERPOS));
+		if (ret != SR_OK)
+			return ret;
+		if ((ret = dsl_fpga_arm(sdi)) != SR_OK)
+			return ret;
+	}
 
 	if ((ret = command_start_acquisition(sdi)) != SR_OK)
 		return ret;
@@ -1950,6 +1964,197 @@ SR_PRIV gboolean dsl_probe_fgain_inrange(struct sr_channel *probe, gboolean comb
 	}
 
 	return FALSE;
+}
+
+/* ===========================================================================
+ * dslogic_dso_cmd_gen — generate DSO hardware command word
+ * (ported from old dslogic.c, adapted for upstream libsigrok API)
+ *
+ * Builds a 64-bit command word for DSO settings (VDIV, coupling, samplerate,
+ * trigger position/slope/source/value/margin/holdoff, DSO sync).
+ * The command is sent to hardware via dsl_wr_dso().
+ *
+ * Config key IDs used here mirror the fork SR_CONF_* values; they are only
+ * used locally as switch-case labels, not passed to the upstream config API.
+ * =========================================================================== */
+
+SR_PRIV uint64_t dslogic_dso_cmd_gen(const struct sr_dev_inst *sdi,
+	struct sr_channel *ch, int cmd_id)
+{
+	struct dev_context *devc;
+	uint64_t cmd = 0;
+	int channel_cnt = 0;
+	GSList *l;
+	struct sr_channel *en_probe = ch;
+
+	devc = sdi->priv;
+
+	switch (cmd_id) {
+	case DSO_CMD_PROBE_VDIV:
+	case DSO_CMD_PROBE_EN:
+	case DSO_CMD_TIMEBASE:
+	case DSO_CMD_PROBE_COUPLING:
+		for (l = sdi->channels; l; l = l->next) {
+			struct sr_channel *probe = (struct sr_channel *)l->data;
+			if (probe->enabled) {
+				channel_cnt += probe->index + 0x1;
+				en_probe = probe;
+			}
+		}
+		if (channel_cnt == 0)
+			return 0x0;
+
+		/* --VDBS */
+		if (channel_cnt != 1)
+			en_probe = ch;
+		if (en_probe && en_probe->priv) {
+			switch (DSL_CH_PRIV(en_probe)->vdiv) {
+			case 5:     cmd += 0x247000; break;
+			case 10:    cmd += 0x23D000; break;
+			case 20:    cmd += 0x22F000; break;
+			case 50:    cmd += 0x21C800; break;
+			case 100:   cmd += 0x20E800; break;
+			case 200:   cmd += 0x200800; break;
+			case 500:   cmd += 0x2F000; break;
+			case 1000:  cmd += 0x21100; break;
+			case 2000:  cmd += 0x13000; break;
+			case 5000:  cmd += 0x00800; break;
+			default: cmd += 0x21100; break;
+			}
+		}
+		/* --DC/AC */
+		if (channel_cnt == 1) {
+			for (l = sdi->channels; l; l = l->next) {
+				struct sr_channel *probe = (struct sr_channel *)l->data;
+				if (probe->priv && DSL_CH_PRIV(probe)->coupling == DSL_COUPLING_AC)
+					cmd += 0x100000;
+				break;
+			}
+		} else {
+			if (ch && ch->priv && DSL_CH_PRIV(ch)->coupling == DSL_COUPLING_AC)
+				cmd += 0x100000;
+		}
+
+		/* --Channel */
+		if (devc->mode != DSL_MODE_LOGIC) {
+			if (channel_cnt == 1)
+				cmd += 0xC00000;
+			else if (ch && ch->index == 0)
+				cmd += 0x400000;
+			else if (ch && ch->index == 1)
+				cmd += 0x800000;
+			else
+				cmd += 0x000000;
+		}
+
+		/* --Header */
+		cmd += 0x55000000;
+		break;
+	case DSO_CMD_SAMPLERATE:
+		for (l = sdi->channels; l; l = l->next) {
+			struct sr_channel *probe = (struct sr_channel *)l->data;
+			channel_cnt += probe->enabled;
+		}
+		cmd += 0x18;
+		{
+			uint32_t divider = (uint32_t)ceil(channel_modes[devc->ch_mode].max_samplerate * 1.0
+				/ devc->cur_samplerate / channel_cnt);
+			cmd += (uint64_t)divider << 8;
+		}
+		break;
+	case DSO_CMD_HORIZ_TRIGGERPOS:
+		cmd += 0x20;
+		cmd += (uint64_t)devc->trigger_hpos << 8;
+		break;
+	case DSO_CMD_TRIGGER_SLOPE:
+		cmd += 0x28;
+		cmd += (uint64_t)devc->trigger_slope << 8;
+		break;
+	case DSO_CMD_TRIGGER_SOURCE:
+		cmd += 0x30;
+		cmd += (uint64_t)devc->trigger_source << 8;
+		break;
+	case DSO_CMD_TRIGGER_VALUE:
+		cmd += 0x38;
+		for (l = sdi->channels; l; l = l->next) {
+			struct sr_channel *probe = (struct sr_channel *)l->data;
+			if (probe->priv)
+				cmd += (uint64_t)DSL_CH_PRIV(probe)->trig_value << (8 * (probe->index + 1));
+		}
+		break;
+	case DSO_CMD_TRIGGER_MARGIN:
+		cmd += 0x40;
+		cmd += ((uint64_t)devc->trigger_margin << 8);
+		break;
+	case DSO_CMD_TRIGGER_HOLDOFF:
+		cmd += 0x58;
+		cmd += (uint64_t)devc->trigger_holdoff << 8;
+		break;
+	case DSO_CMD_DSO_SYNC:
+		cmd = 0xa5a5a500;
+		break;
+	default:
+		cmd = 0xFFFFFFFF;
+	}
+
+	return cmd;
+}
+
+SR_PRIV int dslogic_dso_init(const struct sr_dev_inst *sdi)
+{
+	int ret;
+	GSList *l;
+
+	for (l = sdi->channels; l; l = l->next) {
+		struct sr_channel *probe = (struct sr_channel *)l->data;
+		ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, probe, DSO_CMD_PROBE_COUPLING));
+		if (ret != SR_OK) {
+			sr_err("DSO set coupling of channel %d command failed!", probe->index);
+			return ret;
+		}
+		ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, probe, DSO_CMD_PROBE_VDIV));
+		if (ret != SR_OK) {
+			sr_err("Set VDIV of channel %d command failed!", probe->index);
+			return ret;
+		}
+	}
+
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_SAMPLERATE));
+	if (ret != SR_OK) {
+		sr_err("Set Sample Rate command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_HORIZ_TRIGGERPOS));
+	if (ret != SR_OK) {
+		sr_err("Set Horiz Trigger Position command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_HOLDOFF));
+	if (ret != SR_OK) {
+		sr_err("Set Trigger Holdoff Time command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_SLOPE));
+	if (ret != SR_OK) {
+		sr_err("Set Trigger Slope command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_SOURCE));
+	if (ret != SR_OK) {
+		sr_err("Set Trigger Source command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_VALUE));
+	if (ret != SR_OK) {
+		sr_err("Set Trigger Value command failed!");
+		return ret;
+	}
+	ret = dsl_wr_dso(sdi, dslogic_dso_cmd_gen(sdi, NULL, DSO_CMD_TRIGGER_MARGIN));
+	if (ret != SR_OK) {
+		sr_err("Set Trigger Margin command failed!");
+		return ret;
+	}
+	return ret;
 }
 
 /* ===========================================================================
