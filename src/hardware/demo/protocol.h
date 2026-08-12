@@ -127,6 +127,30 @@ enum logic_pattern_type {
 	 * I2C traffic for protocol decoder testing.
 	 */
 	PATTERN_I2C,
+
+	/**
+	 * Mixed protocol pattern: fills all 32 logic channels with
+	 * 7 protocol types and 16 bus instances.
+	 *
+	 * Channel layout:
+	 *   ch0-1:   I2C #0 (SCL, SDA)
+	 *   ch2-3:   I2C #1 (SCL, SDA)
+	 *   ch4-7:   SPI #0 (CS, SCLK, MOSI, MISO)
+	 *   ch8-11:  SPI #1
+	 *   ch12-15: SPI #2
+	 *   ch16:    UART #0 RX
+	 *   ch17:    UART #1 RX
+	 *   ch18:    CAN #0 RX
+	 *   ch19:    CAN #1 RX
+	 *   ch20-22: JTAG shared (TCK, TMS, TDI)
+	 *   ch23-26: JTAG TDO #0-3
+	 *   ch27-28: SWD #0 (SWDIO, SWCLK)
+	 *   ch29-30: SWD #1
+	 *   ch31:    PWM
+	 *
+	 * 16 C decoders: 2 I2C + 3 SPI + 2 UART + 2 CAN + 4 JTAG + 2 SWD + 1 PWM
+	 */
+	PATTERN_MIXED,
 };
 
 /* Analog patterns we can generate. */

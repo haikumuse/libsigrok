@@ -402,15 +402,15 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 				byte_val = 0; /* R/W = write */
 			}
 		} else if (frame_bit >= 10 && frame_bit <= 17) {
-			uint8_t data0 = (uint8_t)(frame_num & 0xFF);
+			uint8_t data0 = (uint8_t)(0xFF ^ (frame_num & 0xFF));
 			bit_in_byte = 7 - (frame_bit - 10);
 			byte_val = (data0 >> bit_in_byte) & 1;
 		} else if (frame_bit >= 19 && frame_bit <= 26) {
-			uint8_t data1 = (uint8_t)((frame_num + 1) & 0xFF);
+			uint8_t data1 = (uint8_t)(0xAA ^ (frame_num & 0xFF));
 			bit_in_byte = 7 - (frame_bit - 19);
 			byte_val = (data1 >> bit_in_byte) & 1;
 		} else if (frame_bit >= 28 && frame_bit <= 35) {
-			uint8_t data2 = (uint8_t)((frame_num + 2) & 0xFF);
+			uint8_t data2 = (uint8_t)(0x55 ^ (frame_num & 0xFF));
 			bit_in_byte = 7 - (frame_bit - 28);
 			byte_val = (data2 >> bit_in_byte) & 1;
 		}
@@ -423,6 +423,398 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 
 	*scl = scl_val;
 	*sda = sda_val;
+}
+
+/* ---- Mixed pattern generators: SPI, UART, CAN, PWM, I2S, MIPI DSI, SWD ----
+ *
+ * PATTERN_MIXED fills 16 channels with 8 protocol types:
+ *   ch0-1:   I2C    (SCL, SDA)
+ *   ch2-5:   SPI    (CS, SCLK, MOSI, MISO)
+ *   ch6:     UART   (RX)
+ *   ch7:     CAN    (RX)
+ *   ch8:     PWM    (DATA)
+ *   ch9-11:  I2S    (SCK, WS, SD)
+ *   ch12-13: MIPI DSI (D0N, D0P)
+ *   ch14-15: SWD    (SWDIO, SWCLK)
+ *
+ * 8 buses, each with C + Python decoder = 16 decoders total.
+ */
+
+/* SPI frame: 10 bit times (1 idle + 8 data + 1 idle). */
+#define SPI_FRAME_BITS 10
+
+static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t data_offset,
+	uint8_t *cs, uint8_t *sclk, uint8_t *mosi, uint8_t *miso)
+{
+	uint32_t spi_bit = bit_idx % SPI_FRAME_BITS;
+	uint32_t spi_frame = bit_idx / SPI_FRAME_BITS;
+	uint8_t spi_data = (uint8_t)((spi_frame + data_offset) & 0xFF);
+	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+
+	if (spi_bit == 0 || spi_bit == 9) {
+		*cs = 1; *sclk = 0; *mosi = 0; *miso = 0;
+	} else {
+		int bit_in_byte = 7 - (spi_bit - 1);
+		uint8_t data_bit = (spi_data >> bit_in_byte) & 1;
+		*cs = 0;
+		*sclk = is_high;
+		*mosi = data_bit;
+		*miso = data_bit ^ 1;
+	}
+}
+
+/* UART frame: 10 bit times (1 start + 8 data LSB-first + 1 stop). */
+#define UART_FRAME_BITS 10
+
+static uint8_t uart_get_rx_bit(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t rx_offset)
+{
+	uint32_t uart_bit = bit_idx % UART_FRAME_BITS;
+	uint32_t uart_frame = bit_idx / UART_FRAME_BITS;
+	(void)bit_phase;
+
+	if (uart_bit == 0)
+		return 0; /* Start bit */
+	if (uart_bit == 9)
+		return 1; /* Stop bit */
+	int bit_in_byte = uart_bit - 1;
+	uint8_t rx_data = (uint8_t)((uart_frame + rx_offset) & 0xFF);
+	rx_data ^= 0xAA;
+	return (rx_data >> bit_in_byte) & 1;
+}
+
+/* CAN frame: simplified CAN 2.0 standard frame, 63 bits.
+ * bit 0:      SOF (dominant/0)
+ * bits 1-11:  Identifier (11 bits, MSB first)
+ * bit 12:     RTR (0=data)
+ * bit 13:     IDE (0=standard)
+ * bit 14:     r0 (0)
+ * bits 15-18: DLC (4 bits, value=2)
+ * bits 19-34: Data (2 bytes, MSB first per byte)
+ * bits 35-49: CRC (15 bits, alternating)
+ * bit 50:     CRC delimiter (1)
+ * bit 51:     ACK slot (0=acknowledged)
+ * bit 52:     ACK delimiter (1)
+ * bits 53-59: EOF (7 bits, all 1)
+ * bits 60-62: IFS (3 bits, all 1)
+ * No bit stuffing (data uses 0xAA/0x55 to avoid long runs). */
+#define CAN_FRAME_BITS 63
+
+static uint8_t can_get_bit(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t can_id_offset)
+{
+	uint32_t frame_bit = bit_idx % CAN_FRAME_BITS;
+	uint32_t frame_num = bit_idx / CAN_FRAME_BITS;
+	uint16_t can_id = (uint16_t)(0x100 + ((frame_num + can_id_offset) & 0x3FF));
+	(void)bit_phase;
+
+	if (frame_bit == 0)
+		return 0; /* SOF */
+	if (frame_bit >= 1 && frame_bit <= 11) {
+		int bit_pos = 10 - (frame_bit - 1);
+		return (can_id >> bit_pos) & 1;
+	}
+	if (frame_bit == 12) return 0; /* RTR */
+	if (frame_bit == 13) return 0; /* IDE */
+	if (frame_bit == 14) return 0; /* r0 */
+	if (frame_bit >= 15 && frame_bit <= 18) {
+		int bit_pos = 3 - (frame_bit - 15);
+		return (2 >> bit_pos) & 1; /* DLC=2 */
+	}
+	if (frame_bit >= 19 && frame_bit <= 34) {
+		int byte_idx = (frame_bit - 19) / 8;
+		int bit_in_byte = 7 - ((frame_bit - 19) % 8);
+		uint8_t data = (byte_idx == 0)
+			? (uint8_t)(0xAA ^ (frame_num & 0xFF))
+			: (uint8_t)(0x55 ^ (frame_num & 0xFF));
+		return (data >> bit_in_byte) & 1;
+	}
+	if (frame_bit >= 35 && frame_bit <= 49)
+		return ((frame_bit - 35) & 1) ? 1 : 0; /* CRC */
+	if (frame_bit == 50) return 1; /* CRC delimiter */
+	if (frame_bit == 51) return 0; /* ACK slot */
+	if (frame_bit == 52) return 1; /* ACK delimiter */
+	return 1; /* EOF + IFS (bits 53-62) */
+}
+
+/* JTAG cycle: 19 bit times.
+ * TMS sequence: TLR(5) → Idle(1) → SelDR(1) → CapDR(1) → ShiftDR(8) → Exit1(1) → UpdDR(1) → Idle(1)
+ * TCK: toggles every half bit time.
+ * TDI: shifts data during Shift-DR phase.
+ * TDO: per-device output during Shift-DR phase. */
+#define JTAG_CYCLE_BITS 19
+
+G_GNUC_UNUSED static void jtag_get_bits(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, int tdo_device_idx,
+	uint8_t *tck, uint8_t *tms, uint8_t *tdi, uint8_t *tdo)
+{
+	static const uint8_t tms_seq[JTAG_CYCLE_BITS] = {
+		1,1,1,1,1, /* Test-Logic-Reset */
+		0,         /* Run-Test/Idle */
+		1,         /* Select-DR-Scan */
+		0,         /* Capture-DR */
+		0,0,0,0,0,0,0,0, /* Shift-DR (8 clocks) */
+		1,         /* Exit1-DR */
+		0,         /* Update-DR */
+		0          /* Run-Test/Idle */
+	};
+	uint32_t jtag_bit = bit_idx % JTAG_CYCLE_BITS;
+	uint32_t jtag_cycle = bit_idx / JTAG_CYCLE_BITS;
+	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+
+	*tck = is_high;
+	*tms = tms_seq[jtag_bit];
+
+	/* TDI: shift during Shift-DR (bits 8-15) */
+	if (jtag_bit >= 8 && jtag_bit <= 15) {
+		uint8_t tdi_data = (uint8_t)((jtag_cycle + 1) & 0xFF);
+		int bit_pos = (jtag_bit - 8) % 8;
+		*tdi = (tdi_data >> bit_pos) & 1;
+	} else {
+		*tdi = 0;
+	}
+
+	/* TDO: per-device data during Shift-DR */
+	if (jtag_bit >= 8 && jtag_bit <= 15) {
+		uint8_t tdo_data = (uint8_t)((jtag_cycle + tdo_device_idx * 16 + 0x80) & 0xFF);
+		int bit_pos = (jtag_bit - 8) % 8;
+		*tdo = (tdo_data >> bit_pos) & 1;
+	} else {
+		*tdo = 0;
+	}
+}
+
+/* SWD transaction: 60 bit times.
+ * bits 0-7:   idle (SWDIO=0)
+ * bit 8:      start (1)
+ * bit 9:      APnDP (0=AP)
+ * bit 10:     RnW (1=read)
+ * bits 11-12: address
+ * bit 13:     turnaround
+ * bits 14-16: ACK (001=OK)
+ * bits 17-48: data (32 bits, LSB first)
+ * bit 49:     parity
+ * bit 50:     turnaround
+ * bits 51-59: trailing idle */
+#define SWD_TRANS_BITS 60
+
+static void swd_get_bits(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t swd_offset,
+	uint8_t *swdio, uint8_t *swclk)
+{
+	uint32_t swd_bit = bit_idx % SWD_TRANS_BITS;
+	uint32_t swd_trans = bit_idx / SWD_TRANS_BITS;
+	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+
+	*swclk = is_high;
+
+	if (swd_bit < 8) {
+		*swdio = 0; /* idle */
+	} else if (swd_bit == 8) {
+		*swdio = 1; /* start */
+	} else if (swd_bit == 9) {
+		*swdio = 0; /* APnDP */
+	} else if (swd_bit == 10) {
+		*swdio = 1; /* RnW = read */
+	} else if (swd_bit >= 11 && swd_bit <= 12) {
+		*swdio = ((swd_trans + swd_offset) >> (swd_bit - 11)) & 1;
+	} else if (swd_bit == 13) {
+		*swdio = 0; /* turnaround */
+	} else if (swd_bit >= 14 && swd_bit <= 16) {
+		*swdio = (swd_bit == 14) ? 1 : 0; /* ACK=001 */
+	} else if (swd_bit >= 17 && swd_bit <= 48) {
+		uint32_t data = 0xDEADBEEF + swd_trans + swd_offset;
+		*swdio = (data >> (swd_bit - 17)) & 1;
+	} else if (swd_bit == 49) {
+		*swdio = 0; /* parity */
+	} else if (swd_bit == 50) {
+		*swdio = 0; /* turnaround */
+	} else {
+		*swdio = 0; /* trailing idle */
+	}
+}
+
+/* PWM for mixed mode: 50% duty, period=100 samples (10 kHz at 1 MHz). */
+static uint8_t pwm_mixed_get_bit(uint32_t sample_idx)
+{
+	return (sample_idx % 100) < 50 ? 1 : 0;
+}
+
+/* I2S frame: 64 bit times (32 left + 32 right channel).
+ * SCK: toggles every half bit time (rising edge samples data).
+ * WS: 0 for left channel, 1 for right, changes one SCK before first bit.
+ * SD: MSB first, 16-bit audio in 32-bit slot (upper 16 bits). */
+#define I2S_FRAME_BITS 64
+
+static void i2s_get_bits(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t data_offset,
+	uint8_t *sck, uint8_t *ws, uint8_t *sd)
+{
+	uint32_t frame_bit = bit_idx % I2S_FRAME_BITS;
+	uint32_t frame_num = bit_idx / I2S_FRAME_BITS;
+	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+
+	*sck = is_high;
+	*ws = (frame_bit >= 32) ? 1 : 0;
+
+	/* 16-bit audio sample MSB first in upper half of 32-bit slot */
+	uint32_t bit_in_slot = frame_bit % 32;
+	if (bit_in_slot < 16) {
+		uint16_t sample;
+		if (frame_bit < 32)
+			sample = (uint16_t)((frame_num * 137 + data_offset) & 0xFFFF);
+		else
+			sample = (uint16_t)((frame_num * 137 + data_offset + 0x8000) & 0xFFFF);
+		int bit_pos = 15 - bit_in_slot;
+		*sd = (sample >> bit_pos) & 1;
+	} else {
+		*sd = 0;
+	}
+}
+
+/* MIPI DSI LP data frame: 44 bit times.
+ * LP states (D0N, D0P):
+ *   LP-11 (1,1): idle / stop
+ *   LP-01 (0,1): start, escape mode, data bit=1 edge
+ *   LP-10 (1,0): data bit=0 edge
+ *   LP-00 (0,0): turnaround, data valid
+ *
+ * Frame layout:
+ *   bits 0-3:  LP-11 (idle)
+ *   bit  4:    LP-01 (start — D0N falls while D0P high)
+ *   bit  5:    LP-00 (turnaround)
+ *   bit  6:    LP-01 (escape mode select)
+ *   bit  7:    LP-00 (turnaround)
+ *   bits 8-39: 2 bytes data, LSB first, each bit = 2 states (edge + valid)
+ *   bits 40-43: LP-11 (stop) */
+#define MIPI_DSI_FRAME_BITS 44
+#define MIPI_DSI_DATA_BYTES 2
+
+static void mipi_dsi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t data_offset,
+	uint8_t *d0n, uint8_t *d0p)
+{
+	uint32_t frame_bit = bit_idx % MIPI_DSI_FRAME_BITS;
+	uint32_t frame_num = bit_idx / MIPI_DSI_FRAME_BITS;
+	(void)bit_phase;
+	(void)bittime;
+
+	if (frame_bit < 4) {
+		/* Idle: LP-11 */
+		*d0n = 1; *d0p = 1;
+	} else if (frame_bit == 4) {
+		/* Start: LP-01 (D0N falls while D0P high) */
+		*d0n = 0; *d0p = 1;
+	} else if (frame_bit == 5) {
+		/* Turnaround: LP-00 */
+		*d0n = 0; *d0p = 0;
+	} else if (frame_bit == 6) {
+		/* Escape mode: LP-01 */
+		*d0n = 0; *d0p = 1;
+	} else if (frame_bit == 7) {
+		/* Turnaround: LP-00 */
+		*d0n = 0; *d0p = 0;
+	} else if (frame_bit >= 8 && frame_bit < 8 + MIPI_DSI_DATA_BYTES * 8 * 2) {
+		/* Data: 2 bytes, LSB first, each bit = 2 states (edge + valid) */
+		uint32_t data_idx = frame_bit - 8;
+		uint32_t bit_pair = data_idx / 2;  /* which data bit (0-15) */
+		uint32_t is_valid = data_idx % 2;  /* 0=edge, 1=valid */
+
+		uint32_t byte_idx = bit_pair / 8;  /* 0 or 1 */
+		uint32_t bit_in_byte = bit_pair % 8;  /* 0-7, LSB first */
+
+		uint8_t data_byte = (byte_idx == 0)
+			? (uint8_t)((frame_num * 31 + data_offset) & 0xFF)
+			: (uint8_t)((frame_num * 31 + data_offset + 0x42) & 0xFF);
+		uint8_t bit_val = (data_byte >> bit_in_byte) & 1;
+
+		if (is_valid) {
+			/* Data valid: LP-00 */
+			*d0n = 0; *d0p = 0;
+		} else {
+			/* Data edge: bit=1 → LP-01, bit=0 → LP-10 */
+			if (bit_val) {
+				*d0n = 0; *d0p = 1;
+			} else {
+				*d0n = 1; *d0p = 0;
+			}
+		}
+	} else {
+		/* Stop: LP-11 */
+		*d0n = 1; *d0p = 1;
+	}
+}
+
+/* Generate a 32-bit sample for PATTERN_MIXED.
+ * Returns one bit per channel (bit 0 = ch0, bit 31 = ch31).
+ * ch0-15 carry 8 protocol types; ch16-31 mirror ch0-15.
+ *
+ * Channel layout (16 channels, 8 protocol types):
+ *   ch0-1:   I2C     (SCL, SDA)
+ *   ch2-5:   SPI     (CS, SCLK, MOSI, MISO)
+ *   ch6:     UART    (RX)
+ *   ch7:     CAN     (RX)
+ *   ch8:     PWM     (DATA)
+ *   ch9-11:  I2S     (SCK, WS, SD)
+ *   ch12-13: MIPI DSI (D0N, D0P)
+ *   ch14-15: SWD     (SWDIO, SWCLK)
+ *   ch16-31: mirror of ch0-15
+ */
+static uint32_t mixed_get_sample(uint32_t bit_idx, uint32_t bit_phase,
+	uint32_t bittime, uint32_t sample_idx)
+{
+	uint32_t val = 0;
+
+	/* I2C: ch0=SCL, ch1=SDA */
+	{
+		uint8_t scl, sda;
+		i2c_get_bit(bit_idx, bit_phase, bittime, &scl, &sda);
+		val |= (uint32_t)scl << 0;
+		val |= (uint32_t)sda << 1;
+	}
+	/* SPI: ch2=CS, ch3=SCLK, ch4=MOSI, ch5=MISO */
+	{
+		uint8_t cs, sclk, mosi, miso;
+		spi_get_bits(bit_idx, bit_phase, bittime, 0, &cs, &sclk, &mosi, &miso);
+		val |= (uint32_t)cs << 2;
+		val |= (uint32_t)sclk << 3;
+		val |= (uint32_t)mosi << 4;
+		val |= (uint32_t)miso << 5;
+	}
+	/* UART: ch6=RX */
+	val |= (uint32_t)uart_get_rx_bit(bit_idx, bit_phase, bittime, 0) << 6;
+	/* CAN: ch7=RX */
+	val |= (uint32_t)can_get_bit(bit_idx, bit_phase, bittime, 0) << 7;
+	/* PWM: ch8=DATA */
+	val |= (uint32_t)pwm_mixed_get_bit(sample_idx) << 8;
+	/* I2S: ch9=SCK, ch10=WS, ch11=SD */
+	{
+		uint8_t sck, ws, sd;
+		i2s_get_bits(bit_idx, bit_phase, bittime, 0, &sck, &ws, &sd);
+		val |= (uint32_t)sck << 9;
+		val |= (uint32_t)ws << 10;
+		val |= (uint32_t)sd << 11;
+	}
+	/* MIPI DSI: ch12=D0N, ch13=D0P */
+	{
+		uint8_t d0n, d0p;
+		mipi_dsi_get_bits(bit_idx, bit_phase, bittime, 0, &d0n, &d0p);
+		val |= (uint32_t)d0n << 12;
+		val |= (uint32_t)d0p << 13;
+	}
+	/* SWD: ch14=SWDIO, ch15=SWCLK */
+	{
+		uint8_t swdio, swclk;
+		swd_get_bits(bit_idx, bit_phase, bittime, 0, &swdio, &swclk);
+		val |= (uint32_t)swdio << 14;
+		val |= (uint32_t)swclk << 15;
+	}
+
+	/* Mirror ch0-15 to ch16-31 so all 32 channels have data. */
+	val |= (val & 0xFFFF) << 16;
+
+	return val;
 }
 
 static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
@@ -545,6 +937,26 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 				i2c_get_bit(bit_idx, bit_phase, bittime, &scl_bit, &sda_bit);
 				val = (uint64_t)scl_bit | ((uint64_t)sda_bit << 1);
 				set_logic_data(val, &devc->logic_data[i], devc->logic_unitsize);
+			}
+			devc->step++;
+		}
+		break;
+	case PATTERN_MIXED:
+		/* Mixed pattern: 32 channels of I2C+SPI+UART.
+		 * Uses devc->step as a global sample counter.
+		 * Each protocol bit occupies MIXED_BITTIME samples. */
+		{
+			const uint32_t bittime = I2C_BITTIME;
+			uint32_t bit_phase = devc->step % bittime;
+			uint32_t bit_idx = devc->step / bittime;
+			uint32_t sample = mixed_get_sample(bit_idx, bit_phase, bittime, (uint32_t)devc->step);
+			set_logic_data(sample, &devc->logic_data[0], devc->logic_unitsize);
+			for (i = devc->logic_unitsize; i < size; i += devc->logic_unitsize) {
+				devc->step++;
+				bit_phase = devc->step % bittime;
+				bit_idx = devc->step / bittime;
+				sample = mixed_get_sample(bit_idx, bit_phase, bittime, (uint32_t)devc->step);
+				set_logic_data(sample, &devc->logic_data[i], devc->logic_unitsize);
 			}
 			devc->step++;
 		}
@@ -824,6 +1236,23 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 						I2C_BITTIME, &scl_bit, &sda_bit);
 					vals[b] = (uint64_t)scl_bit
 						| ((uint64_t)sda_bit << 1);
+					devc->step++;
+				}
+				pack_8_cross(group, s8, vals, num_channels);
+			}
+		}
+		break;
+
+	case PATTERN_MIXED:
+		for (uint64_t g = 0; g < num_groups; g++) {
+			uint8_t *group = dst + g * group_size;
+			for (int s8 = 0; s8 < 8; s8++) {
+				uint64_t vals[8];
+				for (int b = 0; b < 8; b++) {
+					uint32_t bit_phase = devc->step % I2C_BITTIME;
+					uint32_t bit_idx = devc->step / I2C_BITTIME;
+					vals[b] = mixed_get_sample(bit_idx, bit_phase,
+						I2C_BITTIME, (uint32_t)devc->step);
 					devc->step++;
 				}
 				pack_8_cross(group, s8, vals, num_channels);
