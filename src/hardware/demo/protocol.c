@@ -2232,6 +2232,14 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	 */
 	todo_us = samples_todo * G_USEC_PER_SEC / devc->cur_samplerate;
 
+	/* LA_CROSS_DATA group = 64 采样. samples_todo 必须为 64 的倍数, 否则
+	 * fast path 的 cross_samples = (sending_now/64)*64 截断, 而 sent_samples
+	 * 推进完整 sending_now → 每 tick 丢失 sending_now % 64 个采样, demo 侧
+	 * 采样号 (start_sample_index) 与 PXView 实际收到数持续错位 → 周期性尖峰
+	 * (ALL_HIGH 向下 / ALL_LOW 向上). 向下取整到 64 倍数, 无余数丢失.
+	 * 副作用: 采集末尾最多早停 63 采样 (limit_samples 判定用 >=, 可接受). */
+	samples_todo = (samples_todo / 64) * 64;
+
 	logic_done = devc->num_logic_channels > 0 ? 0 : samples_todo;
 	if (!devc->enabled_logic_channels)
 		logic_done = samples_todo;
@@ -2289,7 +2297,14 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 					logic.format = LA_CROSS_DATA;
 					sr_session_send(sdi, &packet);
 				}
-				logic_done += sending_now;
+				/* 修复: logic_done 推进实际发送的 cross_samples (64 对齐截断),
+				 * 而非完整的 sending_now. 否则每 tick 丢失 sending_now % 64 个采样,
+				 * 导致下一 payload 的 start_sample_index 与 CROSS group 边界错位
+				 * → 接收端每 payload (约 25ms) 出现一次周期性尖峰.
+				 * 余数由下一个 tick 的 samples_todo - logic_done 自然补齐.
+				 * cross_samples==0 (sending_now<64, 不足一个 CROSS group) 时无法
+				 * 发送, 需推进 sending_now 避免死循环 (这 <64 个余数采样被丢弃). */
+				logic_done += cross_samples > 0 ? cross_samples : sending_now;
 			} else {
 			/* ═══ Standard path: generate interleaved + convert ═══ */
 				logic_generator(sdi, sending_now * devc->logic_unitsize);
@@ -2381,7 +2396,10 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 						logic.format = LA_CROSS_DATA;
 						sr_session_send(sdi, &packet);
 					}
-					logic_done += logic_send_samples;
+					/* 修复: 与 fast path 一致, 推进实际发送的 cross_samples 而非
+					 * logic_send_samples, 避免每 payload 余数丢失导致 CROSS group
+					 * 边界错位 (周期尖峰). cross_samples==0 时推进完整避免死循环. */
+					logic_done += cross_samples > 0 ? cross_samples : logic_send_samples;
 				}
 			} /* end standard path */
 		}

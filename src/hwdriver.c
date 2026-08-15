@@ -1032,12 +1032,12 @@ static int check_key(const struct sr_dev_driver *driver,
 	}
 	g_variant_unref(gvar_opts);
 	if (!pub_opt) {
-		sr_err("Option '%s' not available%s.", srci->id, suffix);
+		sr_dbg("Option '%s' not available%s.", srci->id, suffix);
 		return SR_ERR_ARG;
 	}
 
 	if (!(pub_opt & op)) {
-		sr_err("Option '%s' not available to %s%s.", srci->id, opstr, suffix);
+		sr_dbg("Option '%s' not available to %s%s.", srci->id, opstr, suffix);
 		return SR_ERR_ARG;
 	}
 
@@ -1115,7 +1115,7 @@ SR_API int sr_config_get(const struct sr_dev_driver *driver,
 	}
 
 	if (ret == SR_ERR_CHANNEL_GROUP)
-		sr_err("%s: No channel group specified.",
+		sr_dbg("%s: No channel group specified.",
 			(sdi) ? sdi->driver->name : "unknown");
 
 	return ret;
@@ -1167,7 +1167,7 @@ SR_API int sr_config_set(const struct sr_dev_inst *sdi,
 	g_variant_unref(data);
 
 	if (ret == SR_ERR_CHANNEL_GROUP)
-		sr_err("%s: No channel group specified.",
+		sr_dbg("%s: No channel group specified.",
 			(sdi) ? sdi->driver->name : "unknown");
 
 	return ret;
@@ -1286,7 +1286,7 @@ SR_API int sr_config_list(const struct sr_dev_driver *driver,
 	}
 
 	if (ret == SR_ERR_CHANNEL_GROUP)
-		sr_err("%s: No channel group specified.",
+		sr_dbg("%s: No channel group specified.",
 			(sdi) ? sdi->driver->name : "unknown");
 
 	return ret;
