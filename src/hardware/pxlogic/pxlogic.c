@@ -2164,6 +2164,15 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi)
     devc->stop = FALSE;
     devc->samples_not_sent = 0;
 
+    /* Loop mode: clear limit_samples so the stop condition in
+     * receive_transfer (which checks is_loop==0 before clipping) has
+     * a clean zero value, even if a previous buffer-mode session left
+     * a non-zero limit_samples. hwdriver.c rejects set_config(0), so
+     * we clear it here at acquisition start. */
+    if (devc->is_loop) {
+        devc->limit_samples = 0;
+    }
+
     devc->trigger_stage = 0;
     usb = sdi->conn;
     devc->cb_data = (void *)sdi;

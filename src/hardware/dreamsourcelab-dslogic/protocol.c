@@ -858,8 +858,10 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 		unsigned int num_samples;
 		int trigger_offset;
 
-		if (!devc->limit_samples || devc->sent_samples < devc->limit_samples) {
-			if (devc->limit_samples && devc->sent_samples + cur_sample_count > devc->limit_samples)
+		/* Loop mode: skip limit_samples clipping — data flows continuously
+		 * until user stops, matching demo/pxlogic's loop_mode behavior. */
+		if (devc->is_loop || !devc->limit_samples || devc->sent_samples < devc->limit_samples) {
+			if (!devc->is_loop && devc->limit_samples && devc->sent_samples + cur_sample_count > devc->limit_samples)
 				num_samples = devc->limit_samples - devc->sent_samples;
 			else
 				num_samples = cur_sample_count;
@@ -891,7 +893,10 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 			}
 		}
 
-		if (devc->limit_samples && devc->sent_samples >= devc->limit_samples) {
+		/* Stop condition: in loop mode, data flows forever until user stops
+		 * (matching demo/pxlogic loop_mode behavior). Without this, DSL would
+		 * abort at limit_samples even when is_loop is set. */
+		if (!devc->is_loop && devc->limit_samples && devc->sent_samples >= devc->limit_samples) {
 			abort_acquisition(devc);
 			free_transfer(transfer);
 		} else {
@@ -1378,6 +1383,15 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->empty_transfer_count = 0;
 	devc->acq_aborted = FALSE;
 	devc->trigger_pos = 0;
+
+	/* Loop mode: clear limit_samples so the stop condition in
+	 * receive_transfer (which now checks !is_loop before stopping) has
+	 * a clean zero value, even if a previous buffer-mode session left
+	 * a non-zero limit_samples. hwdriver.c rejects set_config(0), so
+	 * we clear it here at acquisition start. */
+	if (devc->is_loop) {
+		devc->limit_samples = 0;
+	}
 
 	usb_source_add(sdi->session, devc->ctx, timeout, receive_data, drvc);
 
