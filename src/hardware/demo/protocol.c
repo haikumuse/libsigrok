@@ -2226,12 +2226,6 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 			SAMPLES_PER_FRAME - devc->sent_frame_samples);
 	}
 
-	/* Calculate the actual time covered by this run back from the sample
-	 * count, rounded towards zero. This avoids getting stuck on a too-low
-	 * time delta with no samples being sent due to round-off.
-	 */
-	todo_us = samples_todo * G_USEC_PER_SEC / devc->cur_samplerate;
-
 	/* LA_CROSS_DATA group = 64 采样. samples_todo 必须为 64 的倍数, 否则
 	 * fast path 的 cross_samples = (sending_now/64)*64 截断, 而 sent_samples
 	 * 推进完整 sending_now → 每 tick 丢失 sending_now % 64 个采样, demo 侧
@@ -2239,6 +2233,21 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 	 * (ALL_HIGH 向下 / ALL_LOW 向上). 向下取整到 64 倍数, 无余数丢失.
 	 * 副作用: 采集末尾最多早停 63 采样 (limit_samples 判定用 >=, 可接受). */
 	samples_todo = (samples_todo / 64) * 64;
+
+	/* Calculate the actual time covered by this run back from the sample
+	 * count, rounded towards zero. This avoids getting stuck on a too-low
+	 * time delta with no samples being sent due to round-off.
+	 *
+	 * MUST be computed AFTER the 64-alignment floor above: spent_us may
+	 * only be credited for samples that can actually be sent this tick.
+	 * At samplerates < 2560 Hz a 25 ms tick yields < 64 samples, so the
+	 * floor produces 0 — crediting the unfloored todo_us anyway would
+	 * advance spent_us each tick while never sending anything, deadlocking
+	 * the capture at 0 samples forever (timed captures never reach
+	 * limit_samples → no SR_DF_END). With the credit based on the floored
+	 * count, the unsent time accumulates as debt until >= 64 samples are
+	 * due, then a burst is sent — low-rate captures complete in bursts. */
+	todo_us = samples_todo * G_USEC_PER_SEC / devc->cur_samplerate;
 
 	logic_done = devc->num_logic_channels > 0 ? 0 : samples_todo;
 	if (!devc->enabled_logic_channels)

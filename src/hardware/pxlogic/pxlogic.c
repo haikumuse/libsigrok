@@ -2064,7 +2064,7 @@ static void receive_transfer(struct libusb_transfer *transfer)
         }
     }
 
-    if ((devc->mode == PXLOGIC_MODE_LOGIC || devc->instant) && devc->limit_samples && devc->samples_counter >= devc->limit_samples
+    if ((devc->mode == PXLOGIC_MODE_LOGIC || devc->instant) && !devc->is_loop && devc->limit_samples && devc->samples_counter >= devc->limit_samples
     ) {
         sr_dbg("last  transfer");
         devc->stop = TRUE;
@@ -2102,7 +2102,7 @@ static int receive_data2(int fd, int revents, void *cb_data)
     drvc = di->context;
     libusb_handle_events_timeout_completed(drvc->sr_ctx->libusb_ctx, &tv, &completed);
 
-    if ((devc->mode == PXLOGIC_MODE_LOGIC || devc->instant) && devc->limit_samples && devc->samples_counter >= devc->limit_samples) {
+    if ((devc->mode == PXLOGIC_MODE_LOGIC || devc->instant) && !devc->is_loop && devc->limit_samples && devc->samples_counter >= devc->limit_samples) {
         return TRUE;
     }
 
@@ -2164,14 +2164,11 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi)
     devc->stop = FALSE;
     devc->samples_not_sent = 0;
 
-    /* Loop mode: clear limit_samples so the stop condition in
-     * receive_transfer (which checks is_loop==0 before clipping) has
-     * a clean zero value, even if a previous buffer-mode session left
-     * a non-zero limit_samples. hwdriver.c rejects set_config(0), so
-     * we clear it here at acquisition start. */
-    if (devc->is_loop) {
-        devc->limit_samples = 0;
-    }
+    /* Loop mode: keep limit_samples non-zero so the app ring buffer
+     * (get_ring_sample_count() -> limit_samples) sizes to the selected
+     * duration window and the LOOP capture cycles within it. The
+     * receive_transfer stop condition guards on !is_loop, so loop keeps
+     * streaming forever. Aligns with PXView-1.5.8. */
 
     devc->trigger_stage = 0;
     usb = sdi->conn;

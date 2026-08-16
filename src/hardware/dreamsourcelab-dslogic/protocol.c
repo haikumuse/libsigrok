@@ -1384,14 +1384,10 @@ SR_PRIV int dslogic_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->acq_aborted = FALSE;
 	devc->trigger_pos = 0;
 
-	/* Loop mode: clear limit_samples so the stop condition in
-	 * receive_transfer (which now checks !is_loop before stopping) has
-	 * a clean zero value, even if a previous buffer-mode session left
-	 * a non-zero limit_samples. hwdriver.c rejects set_config(0), so
-	 * we clear it here at acquisition start. */
-	if (devc->is_loop) {
-		devc->limit_samples = 0;
-	}
+	/* Loop mode: keep limit_samples non-zero so the app ring buffer
+	 * (get_ring_sample_count() -> limit_samples) sizes to the selected
+	 * duration window. The receive_transfer stop condition guards on
+	 * !is_loop, so loop keeps streaming forever. Aligns with PXView-1.5.8. */
 
 	usb_source_add(sdi->session, devc->ctx, timeout, receive_data, drvc);
 

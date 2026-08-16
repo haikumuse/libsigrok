@@ -1903,17 +1903,12 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	devc->sent_frame_samples = 0;
 	devc->dso_sent_samples = 0;
 
-	/* Loop mode: clear limit_samples so the driver-level stop condition
-	 * (!loop_mode && limit_samples > 0 && sent_samples >= limit_samples)
-	 * can never trigger, even if a previous buffer-mode session left a
-	 * non-zero limit_samples. The hwdriver.c check_key rejects
-	 * set_config(LIMIT_SAMPLES, 0), so the app layer cannot clear it
-	 * via SR_CONF_LIMIT_SAMPLES — we must do it here. limit_msec is
-	 * also cleared so the hard-timeout branch does not fire. */
-	if (devc->loop_mode) {
-		devc->limit_samples = 0;
-		devc->limit_msec = 0;
-	}
+	/* Loop mode: keep limit_samples non-zero so the app's ring buffer
+	 * (get_ring_sample_count() -> limit_samples) sizes to the selected
+	 * duration window, and the LOOP capture cycles within it (ruler does
+	 * not grow unbounded). The driver-level stop condition already guards
+	 * on !loop_mode, so loop keeps streaming forever. Aligns with
+	 * PXView-1.5.8. */
 
 	/* Setup triggers */
 	if ((trigger = sr_session_trigger_get(sdi->session))) {
