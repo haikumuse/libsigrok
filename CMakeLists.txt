@@ -228,8 +228,6 @@ endif()
 pkg_search_module(LIBFTDI1 libftdi1)
 if(NOT LIBFTDI1_FOUND)
     message(WARNING "libftdi1 not found - FTDI-based drivers will be disabled")
-else()
-    target_include_directories(libsigrok PRIVATE ${LIBFTDI1_INCLUDE_DIRS})
 endif()
 # nettle is needed by rdtech-tc driver (AES-256 firmware decryption).
 # Use pkg_search_module instead of -lnettle so keg-only paths (macOS) are
@@ -247,6 +245,26 @@ target_link_libraries(libsigrok PUBLIC
     $<$<BOOL:${LIBFTDI1_FOUND}>:-lftdi1>
     ${NETTLE_LIBRARIES}
 )
+# Windows/MSYS2: pkg_search_module 可能返回 /ucrt64/... 形式路径，原生
+# Windows 编译器无法解析。若存在真实 MSYS2 前缀则替换为 Windows 路径。
+if(CMAKE_HOST_WIN32 AND EXISTS "C:/msys64/ucrt64/bin")
+    set(_pxv_ucrt64 "C:/msys64/ucrt64")
+    foreach(_mod LIBZIP LIBFTDI1 NETTLE)
+        if(DEFINED ${_mod}_INCLUDE_DIRS AND "${${_mod}_INCLUDE_DIRS}" MATCHES "^/ucrt64/")
+            string(REPLACE "/ucrt64/" "${_pxv_ucrt64}/" ${_mod}_INCLUDE_DIRS "${${_mod}_INCLUDE_DIRS}")
+            string(REPLACE "/ucrt64/" "${_pxv_ucrt64}/" ${_mod}_LIBRARY_DIRS "${${_mod}_LIBRARY_DIRS}")
+            string(REPLACE "/ucrt64/" "${_pxv_ucrt64}/" ${_mod}_LIBDIR "${${_mod}_LIBDIR}")
+            message(STATUS "[pxv] fixed ${_mod} paths -> ${${_mod}_INCLUDE_DIRS}")
+        endif()
+    endforeach()
+    unset(_pxv_ucrt64)
+endif()
+
+# libftdi1 include dirs applied after path fix (would otherwise be /ucrt64/...).
+if(LIBFTDI1_FOUND)
+    target_include_directories(libsigrok PRIVATE ${LIBFTDI1_INCLUDE_DIRS})
+endif()
+
 # libzip / libftdi1 / nettle 在 macOS 上是 keg-only：pkg_search_module 拿到了
 # -lzip/-lftdi1/-lnettle 标志，但 *_LIBRARIES 只含库名不含路径，链接器找不到 dylib。
 # 显式把 *_LIBRARY_DIRS 加进链接搜索路径。
