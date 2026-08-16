@@ -1314,20 +1314,27 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 	}
 
 	/* Apply fixup: mask disabled channels in cross domain.
-	 * In cross format, channel ch's 8 bytes are at offset ch*8
-	 * within each group. For channels beyond first_partial_logic_index,
-	 * zero their 8 bytes. For the partial byte at first_partial_logic_index,
-	 * mask with first_partial_logic_mask. */
-	if (devc->first_partial_logic_index != unitsize) {
-		int fp_idx = (int)devc->first_partial_logic_index;
-		uint8_t fp_mask = devc->first_partial_logic_mask;
+	 * In cross format, channel ch's data is one 8-byte block at
+	 * offset ch*8 within each 64-sample group — there is no byte/bit
+	 * packing. Build an enabled-channel bitmask from the device channels
+	 * and zero the block of every DISABLED channel (by its index). The old
+	 * code used interleaved byte/bit semantics (enabled/8 + a bit-mask) to
+	 * index cross blocks, which dropped or kept the wrong channels for any
+	 * enabled set that wasn't a contiguous prefix from ch0. */
+	{
+		uint64_t enabled_mask = 0;
+		for (GSList *l = sdi->channels; l; l = l->next) {
+			struct sr_channel *ch = l->data;
+			if (ch && ch->type == SR_CHANNEL_LOGIC && ch->enabled &&
+				ch->index >= 0 && ch->index < 8 * (int)unitsize)
+				enabled_mask |= (uint64_t)1 << ch->index;
+		}
 		for (uint64_t g = 0; g < num_groups; g++) {
 			uint8_t *group = dst + g * group_size;
-			for (int s8 = 0; s8 < 8; s8++) {
-				group[fp_idx * 8 + s8] &= fp_mask;
-				for (int idx = fp_idx + 1; idx < (int)unitsize; idx++)
-					group[idx * 8 + s8] = 0;
-			}
+			for (int s8 = 0; s8 < 8; s8++)
+				for (int idx = 0; idx < (int)unitsize * 8; idx++)
+					if (!(enabled_mask & ((uint64_t)1 << idx)))
+						group[idx * 8 + s8] = 0;
 		}
 	}
 

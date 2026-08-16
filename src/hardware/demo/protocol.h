@@ -54,9 +54,23 @@
 #define DEFAULT_ANALOG_AMPLITUDE		10
 #define DEFAULT_ANALOG_OFFSET			0.
 
-/* I2C pattern: samples per I2C bit time. At 1 MHz sample rate,
- * this gives 100 kHz I2C bus speed (10 samples/bit). */
-#define I2C_BITTIME				10
+/* Protocol waveform generators (PATTERN_I2C / PATTERN_MIXED):
+ * independent samples-per-bit (SPB) per protocol so each bus keeps its own
+ * bit timing (they previously shared I2C_BITTIME=10, which corrupted SPI/UART
+ * sampling). At 1 MHz sample rate:
+ *   I2C  50 → 20 kHz bus, 4-phase structure (start/stop/data/hold) fits
+ *   SPI  40 → 25 kHz SCLK (20 samples high / 20 low)
+ *   UART 80 → 12.5 kHz, midpoint sampling with comfortable tolerance
+ *   CAN/I2S/SWD/MIPI 40 → generic default bit time
+ * The MIPI/DSI generator ignores bittime; these are still passed for
+ * uniformity. */
+#define I2C_SPB				50
+#define SPI_SPB				40
+#define UART_SPB			80
+#define CAN_SPB				40
+#define I2S_SPB				40
+#define SWD_SPB				40
+#define MIPI_SPB			40
 
 /* Cyclic random buffer length for PATTERN_ANALOG_RANDOM streaming. The buffer
  * is pre-filled once by init_analog_random_data() and read cyclically by
