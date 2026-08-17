@@ -1960,6 +1960,11 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		 */
 		devc->enabled_logic_channels++;
 	}
+	/* Tight cross encoding: unitsize reflects only ENABLED logic channels,
+	 * so the LA_CROSS_DATA stream packs exactly the enabled channels. */
+	devc->logic_unitsize = (devc->enabled_logic_channels + 7) / 8;
+	if (devc->logic_unitsize < 1)
+		devc->logic_unitsize = 1;
 	devc->first_partial_logic_index = devc->enabled_logic_channels / 8;
 	bitpos = devc->enabled_logic_channels % 8;
 	mask = (1 << bitpos) - 1;

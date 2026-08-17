@@ -314,21 +314,23 @@ static void set_logic_data(uint64_t bits, uint8_t *data, size_t len)
  * on ch0(SCL) and ch1(SDA).
  *
  * The generator uses a frame-based approach. Each I2C transaction is:
- *   START(1 bit) + ADDR(8 bits) + ACK(1 bit) + DATA(8 bits) + ACK(1 bit)
- *   + ... + DATA(8 bits) + ACK(1 bit) + STOP(1 bit)
+ *   2 idle bits + START(1 bit) + ADDR(8 bits) + ACK(1 bit) + DATA(8 bits)
+ *   + ACK(1 bit) + ... + DATA(8 bits) + ACK(1 bit) + STOP(1 bit) + 2 idle
  *
- * Frame layout (bit indices):
- *   bit 0:      START  (SDA falling while SCL high)
- *   bits 1-8:   ADDRESS (7-bit + R/W, MSB first)
- *   bit 9:      ACK (slave pulls SDA low)
- *   bits 10-17: DATA byte 0 (MSB first)
- *   bit 18:     ACK
- *   bits 19-26: DATA byte 1
- *   bit 27:     ACK
- *   bits 28-35: DATA byte 2
- *   bit 36:     ACK
- *   bit 37:     STOP  (SDA rising while SCL high)
- * Total: 38 bits per transaction (3 data bytes)
+ * Frame layout (bit indices, after 2 leading idle bits):
+ *   bit 0-1:    bus idle (SCL=1, SDA=1)
+ *   bit 2:      START  (SDA falling while SCL high)
+ *   bits 3-10:  ADDRESS (7-bit + R/W, MSB first)
+ *   bit 11:     ACK (slave pulls SDA low)
+ *   bits 12-19: DATA byte 0 (MSB first)
+ *   bit 20:     ACK
+ *   bits 21-28: DATA byte 1
+ *   bit 29:     ACK
+ *   bits 30-37: DATA byte 2
+ *   bit 38:     ACK
+ *   bit 39:     STOP  (SDA rising while SCL high)
+ *   bits 40-41: bus idle (SCL=1, SDA=1)
+ * Total: 42 bits per transaction (3 data bytes)
  *
  * Address is fixed at 0x50 (standard 24C02 EEPROM device address).
  * Data bytes form an EEPROM write sequence:
@@ -336,13 +338,17 @@ static void set_logic_data(uint64_t bits, uint8_t *data, size_t len)
  *   DATA1 = data value 1 (0x10 + low nibble of frame)
  *   DATA2 = data value 2 (0x20 + low nibble of frame)
  *
- * Bit encoding within each I2C bit time (I2C_BITTIME samples):
- *   For data bits: first half SCL=low (SDA can change),
- *   second half SCL=high (SDA stable).
+ * Bit encoding within each I2C bit time (I2C_SPB samples):
+ *   For data bits: first half SCL=low (SDA can change), second half
+ *   SCL=high (SDA stable). SDA switches only during the SCL-low window,
+ *   and only after the first SPB/8 samples of that window (hold time), so
+ *   SDA never transitions while SCL is high — this is what the i2c_c
+ *   decoder relies on to detect START/STOP (spec fix-demo-pattern-bus-timing
+ *   requirement R2).
  *   For START: SCL stays high, SDA goes high→low.
  *   For STOP: SCL stays high, SDA goes low→high.
  */
-#define I2C_FRAME_BITS		38
+#define I2C_FRAME_BITS		42
 #define I2C_DATA_BYTES		3
 
 static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
@@ -352,12 +358,17 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t frame_num = bit_idx / I2C_FRAME_BITS;
 	uint8_t addr = 0x50; /* Fixed EEPROM device address (24C02) */
 	uint8_t is_high_phase = (bit_phase >= bittime / 2) ? 1 : 0;
+	uint8_t in_hold = (bit_phase < bittime / 8) ? 1 : 0;
 	uint8_t scl_val = 0, sda_val = 0;
 
 	/* Default: SCL toggles high in second half, low in first half.
-	 * SDA holds its value during SCL high, changes during SCL low. */
+	 * SDA holds its value during SCL high, changes during SCL low
+	 * (only after the SPB/8 hold window, so never while SCL is high). */
 
-	if (frame_bit == 0) {
+	if (frame_bit < 2 || frame_bit >= 40) {
+		/* Leading/trailing bus idle: SCL=1, SDA=1 */
+		scl_val = 1; sda_val = 1;
+	} else if (frame_bit == 2) {
 		/* START: SDA falls while SCL high.
 		 * First quarter: SDA high, SCL high (idle)
 		 * Second quarter: SDA low, SCL high (START edge)
@@ -369,7 +380,7 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 		} else {
 			scl_val = 0; sda_val = 0;
 		}
-	} else if (frame_bit == 37) {
+	} else if (frame_bit == 39) {
 		/* STOP: SDA rises while SCL high.
 		 * First quarter: SCL low, SDA low
 		 * Second quarter: SCL high, SDA low
@@ -381,50 +392,65 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
 		} else {
 			scl_val = 1; sda_val = 1;
 		}
-	} else if (frame_bit == 9 || frame_bit == 18 ||
-		   frame_bit == 27 || frame_bit == 36) {
+	} else if (frame_bit == 11 || frame_bit == 20 ||
+		   frame_bit == 29 || frame_bit == 38) {
 		/* ACK bit: slave pulls SDA low. SCL toggles normally. */
 		scl_val = is_high_phase;
-		sda_val = 0;
+		sda_val = (in_hold && is_high_phase) ? 1 : 0;
 	} else {
 		/* Data bit: determine which bit of address or data.
-		 * Bits 1-8: address (7-bit MSB first + R/W at bit 8).
+		 * Bits 3-10: address (7-bit MSB first + R/W at bit 10).
 		 * R/W is always 0 (write) for simplicity.
-		 * Bits 10-17: data byte 0
-		 * Bits 19-26: data byte 1
-		 * Bits 28-35: data byte 2 */
+		 * Bits 12-19: data byte 0
+		 * Bits 21-28: data byte 1
+		 * Bits 30-37: data byte 2 */
 		uint8_t byte_val = 0;
+		uint8_t prev_val = 1; /* idle level before a data bit */
 		int bit_in_byte = 0;
 
-		if (frame_bit >= 1 && frame_bit <= 8) {
-			/* Address: bits 1-7 are addr[6:0], bit 8 is R/W=0 */
-			if (frame_bit <= 7) {
-				bit_in_byte = 7 - (frame_bit - 1); /* MSB first */
+		if (frame_bit >= 3 && frame_bit <= 10) {
+			/* Address: bits 3-9 are addr[6:0], bit 10 is R/W=0 */
+			if (frame_bit <= 9) {
+				bit_in_byte = 9 - frame_bit; /* MSB first */
 				byte_val = (addr >> bit_in_byte) & 1;
+				if (bit_in_byte < 6)
+					prev_val = (addr >> (bit_in_byte + 1)) & 1;
 			} else {
 				byte_val = 0; /* R/W = write */
 			}
-		} else if (frame_bit >= 10 && frame_bit <= 17) {
+		} else if (frame_bit >= 12 && frame_bit <= 19) {
 			/* EEPROM word address (increments each transaction) */
 			uint8_t data0 = (uint8_t)(frame_num & 0xFF);
-			bit_in_byte = 7 - (frame_bit - 10);
+			bit_in_byte = 19 - frame_bit;
 			byte_val = (data0 >> bit_in_byte) & 1;
-		} else if (frame_bit >= 19 && frame_bit <= 26) {
+			if (bit_in_byte < 7)
+				prev_val = (data0 >> (bit_in_byte + 1)) & 1;
+		} else if (frame_bit >= 21 && frame_bit <= 28) {
 			/* EEPROM data byte 1 */
 			uint8_t data1 = (uint8_t)(0x10 + (frame_num & 0x0F));
-			bit_in_byte = 7 - (frame_bit - 19);
+			bit_in_byte = 28 - frame_bit;
 			byte_val = (data1 >> bit_in_byte) & 1;
-		} else if (frame_bit >= 28 && frame_bit <= 35) {
+			if (bit_in_byte < 7)
+				prev_val = (data1 >> (bit_in_byte + 1)) & 1;
+		} else if (frame_bit >= 30 && frame_bit <= 37) {
 			/* EEPROM data byte 2 */
 			uint8_t data2 = (uint8_t)(0x20 + (frame_num & 0x0F));
-			bit_in_byte = 7 - (frame_bit - 28);
+			bit_in_byte = 37 - frame_bit;
 			byte_val = (data2 >> bit_in_byte) & 1;
+			if (bit_in_byte < 7)
+				prev_val = (data2 >> (bit_in_byte + 1)) & 1;
 		}
 
 		/* SCL toggles: low in first half, high in second half.
-		 * SDA is stable during SCL high, can change during SCL low. */
+		 * SDA is stable during SCL high; it switches to the current
+		 * bit value only after the SPB/8 hold window (SCL low), keeping
+		 * the previous bit's value before that — so SDA never changes
+		 * while SCL is high. */
 		scl_val = is_high_phase;
-		sda_val = byte_val;
+		if (is_high_phase)
+			sda_val = byte_val;
+		else
+			sda_val = in_hold ? prev_val : byte_val;
 	}
 
 	*scl = scl_val;
@@ -446,21 +472,27 @@ static void i2c_get_bit(uint32_t bit_idx, uint32_t bit_phase,
  * 8 buses, each with C + Python decoder = 16 decoders total.
  */
 
-/* SPI Flash READ command frame:
+/* SPI Flash READ command frame (idle-first layout):
+ *   12 idle bits (CS=1, SCLK=0, lines idle) + 40 transfer bits (CS=0).
+ * Transfer bytes (MSB first):
  *   byte 0: 0x03 (READ Data command)
  *   byte 1: 0x00 (address bits 23-16)
  *   byte 2: 0x00 (address bits 15-8)
  *   byte 3: frame_num & 0xFF (address bits 7-0, increments each frame)
  *   byte 4: 0x10 + (frame_num & 0x0F) (data byte from flash, on MISO)
- * CS stays LOW for all 5 bytes (40 bits), then 10 idle bits (CS high).
- * Total: 50 bits per frame.
+ * CS stays LOW for all 5 bytes (40 bits), then 12 idle bits (CS high).
+ * Total: 52 bits per frame.
+ *
+ * Data lines (MOSI/MISO) switch only during the SCLK-low window and after
+ * the first SPB/8 samples of it (hold time), so they are stable on the
+ * SCLK rising edge — matching SPI mode 0 sampling (spec requirement R2).
  *
  * This produces valid SPI Flash traffic that the spiflash decoder
  * can decode: it sees READ commands with incrementing addresses
  * and recognizable data bytes on MISO. */
 #define SPI_FLASH_CMD_BYTES	5
-#define SPI_FLASH_IDLE_BITS	10
-#define SPI_FRAME_BITS		(SPI_FLASH_CMD_BYTES * 8 + SPI_FLASH_IDLE_BITS)
+#define SPI_FLASH_IDLE_BITS	12
+#define SPI_FRAME_BITS		(SPI_FLASH_IDLE_BITS + SPI_FLASH_CMD_BYTES * 8)
 
 static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t bittime, uint32_t data_offset,
@@ -469,10 +501,11 @@ static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t frame_bit = bit_idx % SPI_FRAME_BITS;
 	uint32_t frame_num = bit_idx / SPI_FRAME_BITS;
 	uint8_t is_high = (bit_phase >= bittime / 2) ? 1 : 0;
+	uint8_t in_hold = (bit_phase < bittime / 8) ? 1 : 0;
 	uint32_t cmd_bits = SPI_FLASH_CMD_BYTES * 8;
 	uint8_t addr_low = (uint8_t)((frame_num + data_offset) & 0xFF);
 
-	if (frame_bit >= cmd_bits) {
+	if (frame_bit < SPI_FLASH_IDLE_BITS) {
 		/* Idle gap: CS high, SCLK low, lines idle */
 		*cs = 1; *sclk = 0; *mosi = 0; *miso = 0;
 		return;
@@ -482,8 +515,8 @@ static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
 	*cs = 0;
 	*sclk = is_high;
 
-	uint32_t byte_idx = frame_bit / 8;
-	int bit_in_byte = 7 - (frame_bit % 8); /* MSB first */
+	uint32_t byte_idx = (frame_bit - SPI_FLASH_IDLE_BITS) / 8;
+	int bit_in_byte = 7 - ((frame_bit - SPI_FLASH_IDLE_BITS) % 8); /* MSB first */
 	uint8_t mosi_byte = 0xFF, miso_byte = 0xFF;
 
 	switch (byte_idx) {
@@ -507,12 +540,32 @@ static void spi_get_bits(uint32_t bit_idx, uint32_t bit_phase,
 		break;
 	}
 
-	*mosi = (mosi_byte >> bit_in_byte) & 1;
-	*miso = (miso_byte >> bit_in_byte) & 1;
+	uint8_t mosi_bit = (mosi_byte >> bit_in_byte) & 1;
+	uint8_t miso_bit = (miso_byte >> bit_in_byte) & 1;
+	/* Switch data lines during the SCLK-low window only (after SPB/8),
+	 * keep them stable while SCLK is high — no transition on the rising
+	 * edge that mode-0 sampling uses. */
+	if (is_high) {
+		*mosi = mosi_bit;
+		*miso = miso_bit;
+	} else {
+		/* During SCLK low: hold previous value for the first SPB/8
+		 * samples, then adopt the new bit (edge happens mid-low). */
+		uint8_t prev_mosi = (bit_in_byte < 7)
+			? ((mosi_byte >> (bit_in_byte + 1)) & 1) : 0xFF;
+		uint8_t prev_miso = (bit_in_byte < 7)
+			? ((miso_byte >> (bit_in_byte + 1)) & 1) : 0xFF;
+		*mosi = in_hold ? prev_mosi : mosi_bit;
+		*miso = in_hold ? prev_miso : miso_bit;
+	}
 }
 
-/* UART frame: 10 bit times (1 start + 8 data LSB-first + 1 stop). */
-#define UART_FRAME_BITS 10
+/* UART frame: 12 bit times = 2 leading mark + 1 start + 8 data LSB-first
+ * + 1 stop + 2 trailing mark. The leading mark (idle) gives the stream a
+ * high level before the first start edge so the decoder can resync on the
+ * first falling edge (spec requirement R3); the trailing mark gives ≥2 bit
+ * times of idle between frames. */
+#define UART_FRAME_BITS 12
 
 static uint8_t uart_get_rx_bit(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t bittime, uint32_t rx_offset)
@@ -521,11 +574,17 @@ static uint8_t uart_get_rx_bit(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t uart_frame = bit_idx / UART_FRAME_BITS;
 	(void)bit_phase;
 
-	if (uart_bit == 0)
+	if (uart_bit < 2)
+		return 1; /* Leading mark (stream idle before start bit) */
+	if (uart_bit == 2)
 		return 0; /* Start bit */
-	if (uart_bit == 9)
+	if (uart_bit == 11)
 		return 1; /* Stop bit */
-	int bit_in_byte = uart_bit - 1;
+	/* Trailing mark idle: bits 10 (already past stop at 11) handled by
+	 * the stop check; remaining bits after stop are mark (1). */
+	if (uart_bit > 11)
+		return 1;
+	int bit_in_byte = (int)uart_bit - 3;
 	uint8_t rx_data = (uint8_t)((uart_frame + rx_offset) & 0xFF);
 	rx_data ^= 0xAA;
 	return (rx_data >> bit_in_byte) & 1;
@@ -812,33 +871,52 @@ static uint32_t mixed_get_sample(uint32_t bit_idx, uint32_t bit_phase,
 	uint32_t bittime, uint32_t sample_idx)
 {
 	uint32_t val = 0;
+	(void)bit_idx;
+	(void)bit_phase;
+	(void)bittime;
+
+	/* Each protocol runs on its own samples-per-bit timebase (R1) so its
+	 * bit boundaries fall at independent positions, plus a small per-bus
+	 * phase offset so edges never align across buses. */
+	uint32_t step = sample_idx;
 
 	/* I2C: ch0=SCL, ch1=SDA */
 	{
 		uint8_t scl, sda;
-		i2c_get_bit(bit_idx, bit_phase, bittime, &scl, &sda);
+		uint32_t p = (step + 0) % I2C_SPB;
+		i2c_get_bit((step + 0) / I2C_SPB, p, I2C_SPB, &scl, &sda);
 		val |= (uint32_t)scl << 0;
 		val |= (uint32_t)sda << 1;
 	}
 	/* SPI: ch2=CS, ch3=SCLK, ch4=MOSI, ch5=MISO */
 	{
 		uint8_t cs, sclk, mosi, miso;
-		spi_get_bits(bit_idx, bit_phase, bittime, 0, &cs, &sclk, &mosi, &miso);
+		uint32_t p = (step + 7) % SPI_SPB;
+		spi_get_bits((step + 7) / SPI_SPB, p, SPI_SPB, 0, &cs, &sclk, &mosi, &miso);
 		val |= (uint32_t)cs << 2;
 		val |= (uint32_t)sclk << 3;
 		val |= (uint32_t)mosi << 4;
 		val |= (uint32_t)miso << 5;
 	}
 	/* UART: ch6=RX */
-	val |= (uint32_t)uart_get_rx_bit(bit_idx, bit_phase, bittime, 0) << 6;
+	{
+		uint32_t p = (step + 13) % UART_SPB;
+		val |= (uint32_t)uart_get_rx_bit((step + 13) / UART_SPB, p,
+			UART_SPB, 0) << 6;
+	}
 	/* CAN: ch7=RX */
-	val |= (uint32_t)can_get_bit(bit_idx, bit_phase, bittime, 0) << 7;
+	{
+		uint32_t p = (step + 19) % CAN_SPB;
+		val |= (uint32_t)can_get_bit((step + 19) / CAN_SPB, p,
+			CAN_SPB, 0) << 7;
+	}
 	/* PWM: ch8=DATA */
 	val |= (uint32_t)pwm_mixed_get_bit(sample_idx) << 8;
 	/* I2S: ch9=SCK, ch10=WS, ch11=SD */
 	{
 		uint8_t sck, ws, sd;
-		i2s_get_bits(bit_idx, bit_phase, bittime, 0, &sck, &ws, &sd);
+		uint32_t p = (step + 23) % I2S_SPB;
+		i2s_get_bits((step + 23) / I2S_SPB, p, I2S_SPB, 0, &sck, &ws, &sd);
 		val |= (uint32_t)sck << 9;
 		val |= (uint32_t)ws << 10;
 		val |= (uint32_t)sd << 11;
@@ -846,14 +924,16 @@ static uint32_t mixed_get_sample(uint32_t bit_idx, uint32_t bit_phase,
 	/* MIPI DSI: ch12=D0N, ch13=D0P */
 	{
 		uint8_t d0n, d0p;
-		mipi_dsi_get_bits(bit_idx, bit_phase, bittime, 0, &d0n, &d0p);
+		uint32_t p = (step + 29) % MIPI_SPB;
+		mipi_dsi_get_bits((step + 29) / MIPI_SPB, p, MIPI_SPB, 0, &d0n, &d0p);
 		val |= (uint32_t)d0n << 12;
 		val |= (uint32_t)d0p << 13;
 	}
 	/* SWD: ch14=SWDIO, ch15=SWCLK */
 	{
 		uint8_t swdio, swclk;
-		swd_get_bits(bit_idx, bit_phase, bittime, 0, &swdio, &swclk);
+		uint32_t p = (step + 31) % SWD_SPB;
+		swd_get_bits((step + 31) / SWD_SPB, p, SWD_SPB, 0, &swdio, &swclk);
 		val |= (uint32_t)swdio << 14;
 		val |= (uint32_t)swclk << 15;
 	}
@@ -963,14 +1043,14 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 	case PATTERN_I2C:
 		/* I2C pattern: ch0=SCL, ch1=SDA.
 		 * Uses devc->step as a global bit counter. Each I2C bit
-		 * occupies I2C_BITTIME samples. The pattern generator
+		 * occupies I2C_SPB samples. The pattern generator
 		 * is a simple state machine that cycles through:
 		 * START → ADDR(7+RW) → ACK → DATA(8) → ACK → ... → STOP.
 		 * Address starts at 0x50 and increments each transaction.
 		 * Data bytes start at 0x00 and increment within each.
 		 */
 		{
-			const uint32_t bittime = I2C_BITTIME;
+			const uint32_t bittime = I2C_SPB;
 			uint32_t bit_phase = devc->step % bittime;
 			uint32_t bit_idx = devc->step / bittime;
 			uint8_t scl_bit, sda_bit;
@@ -991,18 +1071,14 @@ static void logic_generator(struct sr_dev_inst *sdi, uint64_t size)
 	case PATTERN_MIXED:
 		/* Mixed pattern: 32 channels of I2C+SPI+UART.
 		 * Uses devc->step as a global sample counter.
-		 * Each protocol bit occupies MIXED_BITTIME samples. */
+		 * Each protocol has its own samples-per-bit timebase
+		 * (mixed_get_sample derives bit/phase from sample_idx). */
 		{
-			const uint32_t bittime = I2C_BITTIME;
-			uint32_t bit_phase = devc->step % bittime;
-			uint32_t bit_idx = devc->step / bittime;
-			uint32_t sample = mixed_get_sample(bit_idx, bit_phase, bittime, (uint32_t)devc->step);
+			uint32_t sample = mixed_get_sample(0, 0, 0, (uint32_t)devc->step);
 			set_logic_data(sample, &devc->logic_data[0], devc->logic_unitsize);
 			for (i = devc->logic_unitsize; i < size; i += devc->logic_unitsize) {
 				devc->step++;
-				bit_phase = devc->step % bittime;
-				bit_idx = devc->step / bittime;
-				sample = mixed_get_sample(bit_idx, bit_phase, bittime, (uint32_t)devc->step);
+				sample = mixed_get_sample(0, 0, 0, (uint32_t)devc->step);
 				set_logic_data(sample, &devc->logic_data[i], devc->logic_unitsize);
 			}
 			devc->step++;
@@ -1098,11 +1174,12 @@ static void logic_fixup_feed(struct dev_context *devc,
  * group points to the start of a 64-sample group (num_channels * 8 bytes).
  * s8 is the byte index within each channel's 8-byte block (0-7). */
 static inline void pack_8_cross(uint8_t *group, int s8,
-	const uint64_t vals[8], int num_channels)
+	const uint64_t vals[8], const int *enabled_ch, int num_channels)
 {
-	for (int ch = 0; ch < num_channels; ch++) {
+	for (int k = 0; k < num_channels; k++) {
+		int ch = enabled_ch[k];           /* real channel index for tight slot k */
 		uint64_t mask = 1ULL << ch;
-		group[ch * 8 + s8] = (uint8_t)(
+		group[k * 8 + s8] = (uint8_t)(
 			(!!(vals[0] & mask))       |
 			(!!(vals[1] & mask)) << 1  |
 			(!!(vals[2] & mask)) << 2  |
@@ -1134,7 +1211,24 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 {
 	struct dev_context *devc = sdi->priv;
 	size_t unitsize = devc->logic_unitsize;
-	int num_channels = (int)(unitsize * 8);
+	/* Tight packing: only enabled logic channels occupy the stream, in
+	 * ascending channel-index order (matches PXView's _ch_index fill order
+	 * and real PXLogic hardware layout). If a channel is disabled it is
+	 * NOT present, so no per-disabled-channel zeroing is needed. */
+	int tight_index[32];
+	int enabled_ch[32];
+	int num_channels = 0;
+	int nn;
+	memset(tight_index, -1, sizeof(tight_index));
+	for (GSList *l = sdi->channels; l; l = l->next) {
+		struct sr_channel *ch = l->data;
+		if (ch && ch->type == SR_CHANNEL_LOGIC && ch->enabled &&
+			ch->index >= 0 && ch->index < 32) {
+			nn = num_channels++;
+			tight_index[ch->index] = nn;
+			enabled_ch[nn] = ch->index;
+		}
+	}
 	uint64_t num_groups = num_samples / 64;
 	uint8_t *dst = devc->cross_data_buf;
 	size_t group_size = (size_t)num_channels * 8;
@@ -1168,7 +1262,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					}
 					devc->step++;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1186,7 +1280,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 				vals[5] = devc->step++;
 				vals[6] = devc->step++;
 				vals[7] = devc->step++;
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1206,7 +1300,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					else
 						devc->step <<= 1;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1227,7 +1321,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					else
 						devc->step <<= 1;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1248,7 +1342,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					devc->step++;
 					devc->step %= col_count;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1265,7 +1359,7 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					uint64_t gray = devc->step ^ (devc->step >> 1);
 					vals[b] = gray & devc->all_logic_channels_mask;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 	break;
@@ -1276,16 +1370,16 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 			for (int s8 = 0; s8 < 8; s8++) {
 				uint64_t vals[8];
 				for (int b = 0; b < 8; b++) {
-					uint32_t bit_phase = devc->step % I2C_BITTIME;
-					uint32_t bit_idx = devc->step / I2C_BITTIME;
+					uint32_t bit_phase = devc->step % I2C_SPB;
+					uint32_t bit_idx = devc->step / I2C_SPB;
 					uint8_t scl_bit, sda_bit;
 					i2c_get_bit(bit_idx, bit_phase,
-						I2C_BITTIME, &scl_bit, &sda_bit);
+						I2C_SPB, &scl_bit, &sda_bit);
 					vals[b] = (uint64_t)scl_bit
 						| ((uint64_t)sda_bit << 1);
 					devc->step++;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1296,13 +1390,13 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 			for (int s8 = 0; s8 < 8; s8++) {
 				uint64_t vals[8];
 				for (int b = 0; b < 8; b++) {
-					uint32_t bit_phase = devc->step % I2C_BITTIME;
-					uint32_t bit_idx = devc->step / I2C_BITTIME;
-					vals[b] = mixed_get_sample(bit_idx, bit_phase,
-						I2C_BITTIME, (uint32_t)devc->step);
+					/* mixed_get_sample derives each bus's bit/phase
+					 * from sample_idx internally (independent SPB). */
+					vals[b] = mixed_get_sample(0, 0, 0,
+						(uint32_t)devc->step);
 					devc->step++;
 				}
-				pack_8_cross(group, s8, vals, num_channels);
+				pack_8_cross(group, s8, vals, enabled_ch, num_channels);
 			}
 		}
 		break;
@@ -1311,31 +1405,6 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 		memset(dst, 0, num_groups * group_size);
 		sr_err("Unknown pattern: %d.", devc->logic_pattern);
 		break;
-	}
-
-	/* Apply fixup: mask disabled channels in cross domain.
-	 * In cross format, channel ch's data is one 8-byte block at
-	 * offset ch*8 within each 64-sample group — there is no byte/bit
-	 * packing. Build an enabled-channel bitmask from the device channels
-	 * and zero the block of every DISABLED channel (by its index). The old
-	 * code used interleaved byte/bit semantics (enabled/8 + a bit-mask) to
-	 * index cross blocks, which dropped or kept the wrong channels for any
-	 * enabled set that wasn't a contiguous prefix from ch0. */
-	{
-		uint64_t enabled_mask = 0;
-		for (GSList *l = sdi->channels; l; l = l->next) {
-			struct sr_channel *ch = l->data;
-			if (ch && ch->type == SR_CHANNEL_LOGIC && ch->enabled &&
-				ch->index >= 0 && ch->index < 8 * (int)unitsize)
-				enabled_mask |= (uint64_t)1 << ch->index;
-		}
-		for (uint64_t g = 0; g < num_groups; g++) {
-			uint8_t *group = dst + g * group_size;
-			for (int s8 = 0; s8 < 8; s8++)
-				for (int idx = 0; idx < (int)unitsize * 8; idx++)
-					if (!(enabled_mask & ((uint64_t)1 << idx)))
-						group[idx * 8 + s8] = 0;
-		}
 	}
 
 	/* Apply PWM override in cross domain.
@@ -1370,8 +1439,9 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 
 		for (uint64_t g = 0; g < num_groups; g++) {
 			uint8_t *group = dst + g * group_size;
-			if (pwm0_step > 0 && num_channels > 6) {
-				uint8_t *ch6 = group + 6 * 8;
+			int s6, s7;
+			if (pwm0_step > 0 && (s6 = tight_index[6]) >= 0) {
+				uint8_t *ch6 = group + s6 * 8;
 				for (int s8 = 0; s8 < 8; s8++) {
 					uint8_t byte = 0;
 					for (int b = 0; b < 8; b++) {
@@ -1384,8 +1454,8 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
 					ch6[s8] = byte;
 				}
 			}
-			if (pwm1_step > 0 && num_channels > 7) {
-				uint8_t *ch7 = group + 7 * 8;
+			if (pwm1_step > 0 && (s7 = tight_index[7]) >= 0) {
+				uint8_t *ch7 = group + s7 * 8;
 				for (int s8 = 0; s8 < 8; s8++) {
 					uint8_t byte = 0;
 					for (int b = 0; b < 8; b++) {
@@ -1412,39 +1482,32 @@ static void logic_generator_cross(struct sr_dev_inst *sdi,
  *   channel (64 samples packed 8 per byte), channels in sequence:
  *   [ch0_8bytes][ch1_8bytes]...[chN-1_8bytes] per group.
  *
- * num_samples must be a multiple of 64. Output size = num_samples * unitsize
- * (same as input — just rearranged).
+ * num_samples must be a multiple of 64. Output size = (num_samples/64) *
+ * num_channels * 8 (tight: only the num_channels enabled logic channels —
+ * NOT num_samples * unitsize).
  */
 static void convert_to_cross_data(const uint8_t *src, uint8_t *dst,
-	uint64_t num_samples, size_t unitsize)
+	uint64_t num_samples, size_t unitsize, int num_channels)
 {
-	uint64_t num_channels = (uint64_t)unitsize * 8;
 	uint64_t num_groups = num_samples / 64;
 
 	memset(dst, 0, num_groups * num_channels * 8);
 
-	/* Optimized: precompute group base pointers and use bit operations
-	 * instead of division/modulo. Iterate by byte position and bit within
-	 * byte (avoids ch/8 and ch%8 per channel). Process 8 samples at a
-	 * time to build each output byte, reducing loop overhead. */
 	for (uint64_t g = 0; g < num_groups; g++) {
 		const uint8_t *src_g = src + (g * 64) * unitsize;
 		uint8_t *dst_g = dst + g * num_channels * 8;
-		for (size_t bp = 0; bp < unitsize; bp++) {
-			for (uint32_t bit = 0; bit < 8; bit++) {
-				uint8_t mask = (uint8_t)(1u << bit);
-				uint64_t ch = (uint64_t)bp * 8 + bit;
-				uint8_t *out = dst_g + ch * 8;
-				/* 8 groups of 8 samples → 8 output bytes */
-				for (uint64_t s8 = 0; s8 < 8; s8++) {
-					uint8_t ob = 0;
-					const uint8_t *p = src_g + (s8 * 8) * unitsize + bp;
-					for (uint64_t b = 0; b < 8; b++) {
-						if (p[b * unitsize] & mask)
-							ob |= (uint8_t)(1u << b);
-					}
-					out[s8] = ob;
+		for (int ch = 0; ch < num_channels; ch++) {
+			size_t bp = (size_t)(ch >> 3);
+			uint8_t mask = (uint8_t)(1u << (ch & 7));
+			uint8_t *out = dst_g + ch * 8;
+			for (uint64_t s8 = 0; s8 < 8; s8++) {
+				uint8_t ob = 0;
+				const uint8_t *p = src_g + (s8 * 8) * unitsize + bp;
+				for (uint64_t b = 0; b < 8; b++) {
+					if (p[b * unitsize] & mask)
+						ob |= (uint8_t)(1u << b);
 				}
+				out[s8] = ob;
 			}
 		}
 	}
@@ -2294,17 +2357,15 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 				 * pass — no logic_generator/fixup/convert needed. */
 				uint64_t cross_samples = (sending_now / 64) * 64;
 				if (cross_samples > 0) {
-					uint64_t cross_len = cross_samples *
-						devc->logic_unitsize;
+					uint64_t cross_chunk = (uint64_t)devc->enabled_logic_channels * 8;
+					uint64_t cross_len = (cross_samples / 64) * cross_chunk;
 					logic_generator_cross(sdi, cross_samples,
 						devc->sent_samples + logic_done);
 
 					if (!devc->loop_mode && devc->limit_samples > 0 &&
 						devc->sent_samples + logic_done + cross_samples
 								>= devc->limit_samples) {
-						uint64_t chunk_sz =
-							(uint64_t)devc->logic_unitsize * 64;
-						if (cross_len > chunk_sz + 3)
+						if (cross_len > cross_chunk + 3)
 							cross_len -= 3;
 					}
 
@@ -2389,9 +2450,11 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 					 * per channel). Any remainder is deferred to next tick. */
 					uint64_t cross_samples = (logic_send_samples / 64) * 64;
 					if (cross_samples > 0) {
+						uint64_t cross_chunk = (uint64_t)devc->enabled_logic_channels * 8;
+						uint64_t cross_len = (cross_samples / 64) * cross_chunk;
 						convert_to_cross_data(logic_src, devc->cross_data_buf,
-							cross_samples, devc->logic_unitsize);
-						uint64_t cross_len = cross_samples * devc->logic_unitsize;
+							cross_samples, devc->logic_unitsize,
+							devc->enabled_logic_channels);
 
 						/* Simulate real hardware: the last packet before stop
 						 * often ends with a partial chunk (not a multiple of
@@ -2402,8 +2465,7 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 						if (!devc->loop_mode && devc->limit_samples > 0 &&
 							devc->sent_samples + logic_done + cross_samples
 									>= devc->limit_samples) {
-							uint64_t chunk_sz = (uint64_t)devc->logic_unitsize * 64;
-							if (cross_len > chunk_sz + 3)
+							if (cross_len > cross_chunk + 3)
 								cross_len -= 3;
 						}
 
