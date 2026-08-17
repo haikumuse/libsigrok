@@ -2365,8 +2365,17 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 					if (!devc->loop_mode && devc->limit_samples > 0 &&
 						devc->sent_samples + logic_done + cross_samples
 								>= devc->limit_samples) {
-						if (cross_len > cross_chunk + 3)
+						if (cross_len > cross_chunk + 3) {
 							cross_len -= 3;
+							/* Keep per-channel u64 alignment (multiple of 8 bytes).
+							 * A bare 3-byte cut makes the payload non-8-aligned; the
+							 * receiver's cross fallback loop (while(len >= 8)) then
+							 * discards len%8 residual bytes without persisting the
+							 * continuation, shifting subsequent frames' per-channel
+							 * byte alignment and producing a glitch on constant
+							 * channels (ch7's flat-high line in the sigrok pattern). */
+							cross_len &= ~(uint64_t)7;
+						}
 					}
 
 					logic.length = cross_len;
@@ -2465,8 +2474,17 @@ SR_PRIV int demo_prepare_data(int fd, int revents, void *cb_data)
 						if (!devc->loop_mode && devc->limit_samples > 0 &&
 							devc->sent_samples + logic_done + cross_samples
 									>= devc->limit_samples) {
-							if (cross_len > cross_chunk + 3)
+							if (cross_len > cross_chunk + 3) {
 								cross_len -= 3;
+								/* Keep per-channel u64 alignment (multiple of 8 bytes).
+								 * A bare 3-byte cut makes the payload non-8-aligned; the
+								 * receiver's cross fallback loop (while(len >= 8)) then
+								 * discards len%8 residual bytes without persisting the
+								 * continuation, shifting subsequent frames' per-channel
+								 * byte alignment and producing a glitch on constant
+								 * channels (ch7's flat-high line in the sigrok pattern). */
+								cross_len &= ~(uint64_t)7;
+							}
 						}
 
 						logic.length = cross_len;
